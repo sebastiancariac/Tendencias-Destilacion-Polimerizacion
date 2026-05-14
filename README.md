@@ -41,6 +41,18 @@ POLIMERIZACIÓN
 - Descarga de datos filtrados en CSV.
 
 
+## Uso en Streamlit Cloud
+
+La app está configurada para **carga manual del Excel**.
+
+1. Entrar al link de Streamlit.
+2. En la barra lateral, dejar seleccionada la opción **Cargar Excel manualmente**.
+3. Subir el archivo `Tendencias.xlsx` o el Excel equivalente.
+4. Seleccionar la unidad: **Destilación** o **Polimerización**.
+5. Usar filtros, gráficos, correlaciones, variables calculadas y análisis de desfase.
+
+No es necesario subir el Excel a GitHub. Cada usuario carga el archivo manualmente desde el navegador.
+
 ## Filtros recomendados
 
 El tilde **Filtros recomendados** está activo por defecto y cambia según la unidad seleccionada.

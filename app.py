@@ -1,4 +1,4 @@
-﻿"""
+"""
 App Streamlit - Analisis de Tendencias
 Unidades: Destilacion y Polimerizacion (LIPP La Plata)
 Fuente de datos: Tendencias.xlsx (hojas DESTILACION y POLIMERIZACION)
@@ -12,6 +12,7 @@ Notas:
 
 import os
 import re
+from io import BytesIO
 from itertools import combinations
 
 import numpy as np
@@ -381,9 +382,8 @@ def buscar_columna_por_descripcion(descripciones_excel, descripcion_buscada):
 
 def obtener_mtime_archivo() -> float | None:
     """
-    Devuelve la fecha de modificacion del Excel.
-    Se usa como argumento de la funcion cacheada para que Streamlit vuelva a leer
-    Tendencias.xlsx cuando el archivo cambia.
+    Devuelve la fecha de modificacion del Excel local.
+    En Streamlit Cloud normalmente se usa carga manual de archivo.
     """
     if not os.path.exists(ARCHIVO):
         return None
@@ -391,25 +391,41 @@ def obtener_mtime_archivo() -> float | None:
 
 
 @st.cache_data(show_spinner="Cargando Excel...")
-def cargar_datos(hoja: str, nombres_cols: list, nombres_legibles: dict, excel_mtime: float | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def cargar_datos(
+    hoja: str,
+    nombres_cols: list,
+    nombres_legibles: dict,
+    excel_mtime: float | None,
+    excel_bytes: bytes | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     # excel_mtime no se usa directamente, pero fuerza a Streamlit a invalidar la cache
-    # cuando cambia la fecha de modificacion de Tendencias.xlsx.
+    # cuando cambia la fecha de modificacion de Tendencias.xlsx en modo local.
     _ = excel_mtime
 
-    if not os.path.exists(ARCHIVO):
-        st.error(f"No se encontro el archivo: {ARCHIVO}")
-        st.stop()
+    fuente_excel = None
+    nombre_fuente = "archivo cargado manualmente"
+
+    if excel_bytes is not None:
+        fuente_excel = BytesIO(excel_bytes)
+    else:
+        if not os.path.exists(ARCHIVO):
+            st.error(f"No se encontro el archivo local: {ARCHIVO}")
+            st.info("En Streamlit Cloud, usa la opción 'Cargar Excel manualmente' desde la barra lateral.")
+            st.stop()
+
+        fuente_excel = ARCHIVO
+        nombre_fuente = "Tendencias.xlsx"
 
     try:
-        df_raw = pd.read_excel(ARCHIVO, sheet_name=hoja, header=None)
+        df_raw = pd.read_excel(fuente_excel, sheet_name=hoja, header=None)
     except ValueError:
-        st.error(f"No existe la hoja '{hoja}' en el archivo Tendencias.xlsx.")
+        st.error(f"No existe la hoja '{hoja}' en el {nombre_fuente}.")
         st.stop()
     except PermissionError:
         st.error("No se puede leer Tendencias.xlsx. Cerralo en Excel y volve a correr la app.")
         st.stop()
     except Exception as exc:
-        st.error(f"Error leyendo Tendencias.xlsx: {exc}")
+        st.error(f"Error leyendo el Excel: {exc}")
         st.stop()
 
     if df_raw.shape[0] < 6 or df_raw.shape[1] < 3:
@@ -489,13 +505,44 @@ nombres_legibles = dict(config["variables"])
 todas_variables = list(nombres_legibles.keys())
 default_vars = list(config["default_vars"])
 
-excel_mtime = obtener_mtime_archivo()
+st.sidebar.markdown("---")
+st.sidebar.subheader("Fuente de datos")
 
-if st.sidebar.button("Actualizar datos desde Excel", use_container_width=True):
+fuente_datos = st.sidebar.radio(
+    "Seleccionar fuente:",
+    options=["Cargar Excel manualmente", "Usar Excel de la carpeta"],
+    index=0,
+)
+
+excel_bytes = None
+excel_mtime = None
+
+if fuente_datos == "Cargar Excel manualmente":
+    archivo_cargado = st.sidebar.file_uploader(
+        "Cargar archivo Excel",
+        type=["xlsx", "xlsm", "xls"],
+    )
+
+    if archivo_cargado is None:
+        st.info("Cargá un archivo Excel desde la barra lateral para comenzar el análisis.")
+        st.stop()
+
+    excel_bytes = archivo_cargado.getvalue()
+    st.sidebar.success(f"Archivo cargado: {archivo_cargado.name}")
+else:
+    excel_mtime = obtener_mtime_archivo()
+
+if st.sidebar.button("Actualizar datos", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-df, mapeo_columnas = cargar_datos(config["hoja"], todas_variables, nombres_legibles, excel_mtime)
+df, mapeo_columnas = cargar_datos(
+    config["hoja"],
+    todas_variables,
+    nombres_legibles,
+    excel_mtime,
+    excel_bytes,
+)
 
 if df.empty:
     st.warning("La hoja seleccionada no tiene datos validos de fecha/hora.")
