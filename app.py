@@ -1730,14 +1730,37 @@ with tab1:
         if modo_grafico_efectivo == "Combinados":
             fig = go.Figure()
             for v in variables_grafico:
+                nombre_traza = nombres_legibles[v]
+
+                # En la vista rapida, acortamos nombres para que la leyenda
+                # no vuelva a ocupar espacio lateral.
+                if grafico_rendimiento_target:
+                    if v == "Rendimiento":
+                        nombre_traza = "Rendimiento real"
+                    elif v == "Productividad_estimada":
+                        nombre_traza = "Target productividad"
+
                 fig.add_trace(go.Scatter(
                     x=df_f["Fecha_y_hora"],
                     y=df_f[v],
-                    name=nombres_legibles[v],
+                    name=nombre_traza,
                     mode="lines+markers",
                     connectgaps=False,
                 ))
-            fig.update_layout(height=550, hovermode="x unified", margin=dict(t=30, b=20, l=20, r=20))
+
+            fig.update_layout(
+                height=650,
+                hovermode="x unified",
+                margin=dict(t=40, b=120, l=40, r=40),
+                legend=dict(
+                    orientation="h",
+                    y=-0.20,
+                    x=0.5,
+                    xanchor="center",
+                    yanchor="top",
+                ),
+            )
+
             st.plotly_chart(fig, use_container_width=True)
         else:
             n = len(variables_grafico)
