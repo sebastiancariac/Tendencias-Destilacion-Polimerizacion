@@ -30,6 +30,26 @@ import streamlit as st
 st.set_page_config(page_title="Analisis de Tendencias", layout="wide")
 st.title("Analisis de Tendencias")
 
+
+def aplicar_layout_leyenda_inferior(fig, titulo=None, altura=650):
+    """Aplica layout común para evitar que la leyenda lateral achique la gráfica."""
+    layout_kwargs = dict(
+        height=altura,
+        margin=dict(l=40, r=40, t=70, b=130),
+        legend=dict(
+            orientation="h",
+            y=-0.22,
+            x=0.5,
+            xanchor="center",
+            yanchor="top",
+        ),
+        hovermode="x unified",
+    )
+    if titulo is not None:
+        layout_kwargs["title"] = titulo
+    fig.update_layout(**layout_kwargs)
+    return fig
+
 CARPETA = os.path.dirname(os.path.abspath(__file__))
 ARCHIVO = os.path.join(CARPETA, "Tendencias.xlsx")
 
