@@ -164,3 +164,9 @@ Copy-Item ".\app.py" ".\app_BACKUP_ANTES_RESTAURAR.py" -Force
 ```
 
 Luego copiar el `app.py` de este backup a la carpeta de la app y ejecutar nuevamente Streamlit.
+
+## Ajustes de interfaz
+
+- Las variables auxiliares usadas internamente para calcular el target de productividad ya no se muestran en el selector principal.
+- En **Variables a graficar**, las variables seleccionadas aparecen debajo del selector con un botón para quitarlas rápidamente.
+- En Polimerización se agregó la opción **Gráfico combinado: Rendimiento vs Target**, que grafica solo `Rendimiento` y `Target productividad` sin agregar el resto de las variables auxiliares.

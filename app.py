@@ -744,31 +744,13 @@ if unidad.startswith("Polimer") and all(
     df["XS_bin_productividad"] = np.nan
     df["Propano_bin_productividad"] = np.nan
 
+    # Variables derivadas visibles en la interfaz.
+    # Las variables auxiliares del modelo de target se calculan internamente,
+    # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
         "Productividad_estimada": "Target productividad por familia [cat+MFI+H2+XS+propano]",
         "Desvio_vs_productividad_estimada": "Desvio vs target por familia [Rendimiento - Target]",
-        "Distancia_benchmark_productividad": "Distancia a target por familia [menor = mas similar]",
         "Confiabilidad_benchmark_productividad": "Confiabilidad target por familia [%]",
-        "Indicador_target_optimo_productividad": "Indicador periodo target optimo [1=top historico]",
-        "Percentil_rendimiento_base": "Percentil rendimiento dentro de base historica [%]",
-        "Familia_productividad_codigo": "Familia productividad codigo [cat+MFI+H2+XS+propano]",
-        "Tipo_catalizador_productividad": "Tipo catalizador productividad [0=ZN306, 1=mixto, 2=ZN389]",
-        "MFI_bin_productividad": "Familia MFI [0=bajo, 1=medio, 2=alto]",
-        "H2_bin_productividad": "Familia H2 [0=bajo, 1=medio, 2=alto]",
-        "XS_bin_productividad": "Familia XS [0=bajo, 1=medio, 2=alto]",
-        "Propano_bin_productividad": "Familia propano [0=bajo, 1=medio, 2=alto]",
-        "Presion_operacion_OK": "Indicador presion operacion OK [1=30<=P R2301<=31 bar]",
-        "Periodo_base_productividad_2024": "Indicador base productividad [2024 + 2025 confiable]",
-        "Caudal_ZN306_activo": "Caudal ZN-306 activo [P-2209B, Pdesc >=30 bar]",
-        "Caudal_ZN389_activo": "Caudal ZN-389 activo [P-2209A, Pdesc >=30 bar]",
-        "Caudal_catalizador_activo": "Caudal catalizador activo total [ZN-306 + ZN-389]",
-        "Fraccion_ZN389_activo": "Fraccion ZN-389 activa [0=ZN306, 1=ZN389]",
-        "Indicador_ZN389_activo": "Indicador ZN-389 activo [1=ZN389, 0=ZN306]",
-        "Delta_MFI_polvo_pellets": "Delta MFI polvo-pellets [MFI polvo - MFI pellets]",
-        "Ratio_H2_propano": "Ratio H2/propano [Conc_H2 / Conc_propano]",
-        "H2_total": "H2 total [H2 a K-2301 + H2 a R-2301]",
-        "Carga_condensadores": "Carga condensadores [E2301A+B+C]",
-        "Rel_TEA_CDonor_calc": "Relacion TEA/C-Donor calculada en app",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -877,16 +859,53 @@ if desde > hasta:
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Variables a graficar")
+
+key_vars_grafico = f"variables_grafico_{unidad}"
+
+if key_vars_grafico not in st.session_state:
+    st.session_state[key_vars_grafico] = [v for v in default_vars if v in todas_variables]
+
+# Evita que queden variables de otra unidad o auxiliares ya ocultas.
+st.session_state[key_vars_grafico] = [
+    v for v in st.session_state[key_vars_grafico]
+    if v in todas_variables
+]
+
 variables_sel = st.sidebar.multiselect(
     "Selecciona variables:",
     options=todas_variables,
-    default=default_vars,
+    default=[],
     format_func=lambda x: nombres_legibles[x],
+    key=key_vars_grafico,
 )
+
+if variables_sel:
+    with st.sidebar.container(border=True):
+        st.caption("Variables seleccionadas")
+        for _var_sel in list(variables_sel):
+            col_nombre, col_quitar = st.columns([4, 1])
+            with col_nombre:
+                st.markdown(f"**{nombres_legibles[_var_sel]}**")
+            with col_quitar:
+                if st.button("✕", key=f"quitar_grafico_{unidad}_{_var_sel}", help="Quitar variable"):
+                    st.session_state[key_vars_grafico] = [
+                        v for v in st.session_state[key_vars_grafico]
+                        if v != _var_sel
+                    ]
+                    st.rerun()
+
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Modo de grafico")
 modo_grafico = st.sidebar.radio("Modo:", options=["Separados", "Combinados"], index=0)
+
+grafico_rendimiento_target = False
+if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimiento", "Productividad_estimada"]):
+    grafico_rendimiento_target = st.sidebar.checkbox(
+        "Grafico combinado: Rendimiento vs Target",
+        value=False,
+        help="Grafica solo Rendimiento y Target estimado, sin modificar la seleccion general de variables.",
+    )
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Agrupacion temporal")
@@ -1673,12 +1692,24 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.subheader(f"{unidad} - Tendencias ({agrupacion.lower()})")
 
-    if not variables_sel:
+    if grafico_rendimiento_target:
+        variables_grafico = ["Rendimiento", "Productividad_estimada"]
+        modo_grafico_efectivo = "Combinados"
+    else:
+        variables_grafico = variables_sel
+        modo_grafico_efectivo = modo_grafico
+
+    variables_grafico = [v for v in variables_grafico if v in df_f.columns]
+
+    if not variables_grafico:
         st.info("Selecciona al menos una variable en el panel lateral.")
     else:
-        if modo_grafico == "Combinados":
+        if grafico_rendimiento_target:
+            st.caption("Vista rapida: Rendimiento real vs Target estimado. Esta opcion no cambia la seleccion general de variables.")
+
+        if modo_grafico_efectivo == "Combinados":
             fig = go.Figure()
-            for v in variables_sel:
+            for v in variables_grafico:
                 fig.add_trace(go.Scatter(
                     x=df_f["Fecha_y_hora"],
                     y=df_f[v],
@@ -1689,7 +1720,7 @@ with tab1:
             fig.update_layout(height=550, hovermode="x unified", margin=dict(t=30, b=20, l=20, r=20))
             st.plotly_chart(fig, use_container_width=True)
         else:
-            n = len(variables_sel)
+            n = len(variables_grafico)
             altura_por_grafico = 300
             altura_total = altura_por_grafico * n
             spacing = min(0.1, 80 / altura_total) if n > 1 else 0
@@ -1698,11 +1729,11 @@ with tab1:
                 rows=n,
                 cols=1,
                 shared_xaxes=True,
-                subplot_titles=[nombres_legibles[v] for v in variables_sel],
+                subplot_titles=[nombres_legibles[v] for v in variables_grafico],
                 vertical_spacing=spacing,
             )
 
-            for i, v in enumerate(variables_sel, 1):
+            for i, v in enumerate(variables_grafico, 1):
                 fig.add_trace(
                     go.Scatter(
                         x=df_f["Fecha_y_hora"],
