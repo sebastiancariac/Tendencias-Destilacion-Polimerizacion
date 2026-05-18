@@ -841,8 +841,16 @@ if unidad.startswith("Polimer") and all(
     df["Periodo_base_productividad_2024"] = np.where((base_2024 | base_2025) & (~periodo_excluido), 1.0, 0.0)
 
     # Se inicializa. El calculo final se hace despues de la agrupacion temporal.
+    # Nombres historicos mantenidos para compatibilidad:
+    # - Productividad_estimada = Rendimiento esperado por producto.
+    # - Desvio_vs_productividad_estimada = Rendimiento real - Rendimiento esperado.
     df["Productividad_estimada"] = np.nan
+    df["Rendimiento_esperado_producto"] = np.nan
+    df["Target_operativo_producto"] = np.nan
+    df["Maximo_historico_validado_producto"] = np.nan
     df["Desvio_vs_productividad_estimada"] = np.nan
+    df["Gap_vs_target_operativo"] = np.nan
+    df["Gap_vs_maximo_historico"] = np.nan
     df["Distancia_benchmark_productividad"] = np.nan
     df["Confiabilidad_benchmark_productividad"] = np.nan
     df["Indicador_target_optimo_productividad"] = np.nan
@@ -857,9 +865,12 @@ if unidad.startswith("Polimer") and all(
     # Las variables auxiliares del modelo de target se calculan internamente,
     # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
-        "Productividad_estimada": "Target por producto [top histórico]",
-        "Desvio_vs_productividad_estimada": "Desvio vs target por producto [Rendimiento - Target]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad target por producto [%]",
+        "Productividad_estimada": "Rendimiento esperado por producto",
+        "Target_operativo_producto": "Target operativo por producto [P90]",
+        "Maximo_historico_validado_producto": "Maximo historico validado por producto",
+        "Desvio_vs_productividad_estimada": "Desvio vs rendimiento esperado [Rendimiento - Esperado]",
+        "Gap_vs_target_operativo": "Gap vs target operativo [Rendimiento - Target]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad referencia por producto [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1009,11 +1020,11 @@ st.sidebar.subheader("Modo de grafico")
 modo_grafico = st.sidebar.radio("Modo:", options=["Separados", "Combinados"], index=0)
 
 grafico_rendimiento_target = False
-if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimiento", "Productividad_estimada"]):
+if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimiento", "Productividad_estimada", "Target_operativo_producto"]):
     grafico_rendimiento_target = st.sidebar.checkbox(
-        "Grafico combinado: Rendimiento vs Target por producto",
+        "Grafico combinado: Rendimiento vs esperado/target",
         value=False,
-        help="Grafica solo Rendimiento y Target por producto, sin modificar la seleccion general de variables.",
+        help="Grafica solo Rendimiento real, Rendimiento esperado y Target operativo por producto, sin modificar la seleccion general de variables.",
     )
 
 st.sidebar.markdown("---")
@@ -1168,17 +1179,29 @@ if unidad.startswith("Polimer"):
 
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
-# AJUSTE FINAL POST-AGRUPACION TARGET OPTIMO POR PRODUCTO
-# La referencia de rendimiento target se calcula por PRODUCTO/CAMPAÑA.
+# AJUSTE FINAL POST-AGRUPACION REFERENCIAS DE RENDIMIENTO POR PRODUCTO
+# Referencias calculadas por PRODUCTO/CAMPAÑA, sin mezclar productos:
 #
-# Criterio:
-# - Base candidata: 28/04/2024-06/10/2024 + 01/05/2025-31/12/2025.
-# - Exclusión: 01/11/2024-30/04/2025 por evento de baja productividad/bajo nivel.
-# - Presión normal de base: 30.0 < P R-2301 < 31.0 bar.
-# - Para cada producto, se toma el TOP 25% de rendimiento de ese mismo producto.
-# - Si el producto no aparece suficiente en la base confiable, se busca el mejor
-#   histórico del mismo producto en todo el rango con presión normal.
-# - No mezcla productos distintos para definir el target.
+# - Rendimiento esperado por producto:
+#   mediana robusta del historico confiable del mismo producto.
+#
+# - Target operativo por producto:
+#   percentil 90 del historico confiable del mismo producto.
+#   Representa un objetivo alto pero repetible, no un punto maximo aislado.
+#
+# - Maximo historico validado por producto:
+#   mejor valor historico dentro de datos confiables del mismo producto.
+#   Se muestra como referencia, pero no se usa como target principal.
+#
+# Base candidata:
+# - 28/04/2024-06/10/2024 + 01/05/2025-31/12/2025.
+# - Se excluye 01/11/2024-30/04/2025 por evento de baja productividad/bajo nivel.
+# - Se priorizan condiciones confiables de operacion:
+#   30 < Presion_R2301 < 31
+#   60 < Nivel_R2301 < 70, si existe
+#   8000 < Calor_reaccion_URA < 13000, si existe
+#   MFI_polvo > 0, si existe
+#   Slurry > 50, si existe
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
     for col in [
@@ -1221,6 +1244,7 @@ if unidad.startswith("Polimer") and all(
             "None": pd.NA,
             "NONE": pd.NA,
             "NaN": pd.NA,
+            "<NA>": pd.NA,
             "0": pd.NA,
             "0.0": pd.NA,
         })
@@ -1229,28 +1253,39 @@ if unidad.startswith("Polimer") and all(
 
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
 
-    _base_confiable = df_agrup.loc[
-        _periodo_base
-        & _presion_ok
-        & _rendimiento.notna()
-        & df_agrup["Producto"].notna()
-    ].copy()
+    # Filtro de calidad de datos para construir la referencia.
+    _calidad_base = _periodo_base & _presion_ok & _rendimiento.notna() & df_agrup["Producto"].notna()
 
-    _base_respaldo = df_agrup.loc[
-        _presion_ok
-        & _rendimiento.notna()
-        & df_agrup["Producto"].notna()
-        & (~_periodo_excluido)
-    ].copy()
+    if "Nivel_R2301" in df_agrup.columns:
+        _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
+        _calidad_base = _calidad_base & (_nivel > 60.0) & (_nivel < 70.0)
 
-    _pred = np.full(len(df_agrup), np.nan)
+    if "Calor_reaccion_URA" in df_agrup.columns:
+        _ura = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
+        _calidad_base = _calidad_base & (_ura > 8000.0) & (_ura < 13000.0)
+
+    if "MFI_polvo" in df_agrup.columns:
+        _mfi_polvo = pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce")
+        _calidad_base = _calidad_base & (_mfi_polvo > 0.0)
+
+    if "Slurry" in df_agrup.columns:
+        _slurry = pd.to_numeric(df_agrup["Slurry"], errors="coerce")
+        _calidad_base = _calidad_base & (_slurry > 50.0)
+
+    _base_confiable = df_agrup.loc[_calidad_base].copy()
+
+    # Respaldo: mismo producto en operacion normal y fuera del periodo excluido.
+    # Se usa solo cuando el producto tiene muy pocos puntos en la base principal.
+    _base_respaldo_mask = _presion_ok & _rendimiento.notna() & df_agrup["Producto"].notna() & (~_periodo_excluido)
+
+    _base_respaldo = df_agrup.loc[_base_respaldo_mask].copy()
+
+    _esperado = np.full(len(df_agrup), np.nan)
+    _target = np.full(len(df_agrup), np.nan)
+    _maximo = np.full(len(df_agrup), np.nan)
     _conf = np.full(len(df_agrup), np.nan)
     _target_flag = np.zeros(len(df_agrup))
     _percentil_base = np.full(len(df_agrup), np.nan)
-
-    # Distancia se mantiene como 0 para puntos target y NaN para el resto,
-    # porque el target por producto es un valor histórico de referencia,
-    # no una distancia multivariable.
     _dist_min = np.full(len(df_agrup), np.nan)
 
     if len(_base_confiable) > 0:
@@ -1281,8 +1316,8 @@ if unidad.startswith("Polimer") and all(
 
         _usa_respaldo = False
 
-        # Si hay pocos puntos en la base principal, usar respaldo del mismo producto
-        # en todo el rango de operación normal, excluyendo el evento de bajo nivel.
+        # Si hay pocos puntos confiables, se usa respaldo del mismo producto,
+        # pero nunca se mezclan productos distintos.
         if len(_pool) < 3:
             _pool = _base_respaldo.loc[
                 _base_respaldo["Producto"].astype(str) == str(_prod)
@@ -1297,30 +1332,40 @@ if unidad.startswith("Polimer") and all(
         if len(_rend_pool) == 0:
             continue
 
-        # Target = promedio del top 25% del rendimiento del mismo producto.
-        # Para productos con pocos datos, usa el máximo histórico del producto.
-        if len(_rend_pool) >= 4:
-            _umbral = _rend_pool.quantile(0.75)
-            _target_vals = _rend_pool.loc[_rend_pool >= _umbral]
-            _target_val = float(_target_vals.mean())
+        _n = len(_rend_pool)
+
+        # Rendimiento esperado: valor central robusto.
+        _esperado_val = float(_rend_pool.median())
+
+        # Target operativo: P90. Si hay pocos puntos, el P90 puede coincidir
+        # con valores cercanos al maximo, pero sigue siendo menos arbitrario
+        # que usar siempre el maximo como objetivo.
+        if _n >= 5:
+            _target_val = float(_rend_pool.quantile(0.90))
+        elif _n >= 3:
+            _target_val = float(_rend_pool.quantile(0.75))
         else:
             _target_val = float(_rend_pool.max())
 
-        _pos_prod = df_agrup.index.get_indexer(_idx_prod)
-        _pred[_pos_prod] = _target_val
+        _maximo_val = float(_rend_pool.max())
 
-        # Confiabilidad simple por cantidad de datos del mismo producto.
-        _n = len(_rend_pool)
+        _pos_prod = df_agrup.index.get_indexer(_idx_prod)
+
+        _esperado[_pos_prod] = _esperado_val
+        _target[_pos_prod] = _target_val
+        _maximo[_pos_prod] = _maximo_val
+
+        # Confiabilidad por cantidad de datos del mismo producto.
         _conf_val = min(100.0, 35.0 + 8.0 * _n)
 
         if _usa_respaldo:
             _conf_val = min(_conf_val, 70.0)
 
-        # Penaliza puntos fuera de presión normal, pero mantiene target visible.
+        # Penaliza puntos fuera de presión normal, pero mantiene referencias visibles.
         _pres_ok_prod = _presion_ok.loc[_idx_prod].to_numpy()
         _conf[_pos_prod] = np.where(_pres_ok_prod, _conf_val, _conf_val * 0.4)
 
-        # Marcar puntos que están en el top histórico usado como target.
+        # Marcar puntos que están cerca del target operativo del producto.
         _pool_target = _pool.loc[pd.to_numeric(_pool["Rendimiento"], errors="coerce") >= _target_val * 0.995]
         _idx_target = _pool_target.index.intersection(df_agrup.index)
         _pos_target = df_agrup.index.get_indexer(_idx_target)
@@ -1328,23 +1373,32 @@ if unidad.startswith("Polimer") and all(
         _dist_min[_pos_target] = 0.0
         _conf[_pos_target] = 100.0
 
-        # En los puntos históricos target, mantener el target como su rendimiento real.
-        _pred[_pos_target] = pd.to_numeric(
-            df_agrup.loc[_idx_target, "Rendimiento"],
-            errors="coerce",
-        ).to_numpy(dtype=float)
+    # Nombres historicos mantenidos:
+    # Productividad_estimada = Rendimiento esperado por producto.
+    df_agrup["Productividad_estimada"] = pd.Series(_esperado, index=df_agrup.index)
+    df_agrup["Rendimiento_esperado_producto"] = pd.Series(_esperado, index=df_agrup.index)
+    df_agrup["Target_operativo_producto"] = pd.Series(_target, index=df_agrup.index)
+    df_agrup["Maximo_historico_validado_producto"] = pd.Series(_maximo, index=df_agrup.index)
 
-    df_agrup["Productividad_estimada"] = pd.Series(_pred, index=df_agrup.index)
     df_agrup["Distancia_benchmark_productividad"] = pd.Series(_dist_min, index=df_agrup.index)
     df_agrup["Confiabilidad_benchmark_productividad"] = pd.Series(_conf, index=df_agrup.index)
     df_agrup["Indicador_target_optimo_productividad"] = pd.Series(_target_flag, index=df_agrup.index)
     df_agrup["Percentil_rendimiento_base"] = pd.Series(_percentil_base, index=df_agrup.index)
 
-    if "Desvio_vs_productividad_estimada" in df_agrup.columns:
-        df_agrup["Desvio_vs_productividad_estimada"] = (
-            pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
-            - pd.to_numeric(df_agrup["Productividad_estimada"], errors="coerce")
-        )
+    df_agrup["Desvio_vs_productividad_estimada"] = (
+        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
+        - pd.to_numeric(df_agrup["Productividad_estimada"], errors="coerce")
+    )
+
+    df_agrup["Gap_vs_target_operativo"] = (
+        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
+        - pd.to_numeric(df_agrup["Target_operativo_producto"], errors="coerce")
+    )
+
+    df_agrup["Gap_vs_maximo_historico"] = (
+        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
+        - pd.to_numeric(df_agrup["Maximo_historico_validado_producto"], errors="coerce")
+    )
 
     if "Presion_operacion_OK" in df_agrup.columns:
         df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
@@ -1610,7 +1664,7 @@ with tab1:
     st.subheader(f"{unidad} - Tendencias ({agrupacion.lower()})")
 
     if grafico_rendimiento_target:
-        variables_grafico = ["Rendimiento", "Productividad_estimada"]
+        variables_grafico = ["Rendimiento", "Productividad_estimada", "Target_operativo_producto"]
         modo_grafico_efectivo = "Combinados"
     else:
         variables_grafico = variables_sel
@@ -1622,7 +1676,7 @@ with tab1:
         st.info("Selecciona al menos una variable en el panel lateral.")
     else:
         if grafico_rendimiento_target:
-            st.caption("Vista rapida: Rendimiento real vs Target por producto. Esta opcion no cambia la seleccion general de variables.")
+            st.caption("Vista rapida: Rendimiento real vs rendimiento esperado y target operativo por producto. Esta opcion no cambia la seleccion general de variables.")
 
         if modo_grafico_efectivo == "Combinados":
             fig = go.Figure()
@@ -1635,7 +1689,9 @@ with tab1:
                     if v == "Rendimiento":
                         nombre_traza = "Rendimiento real"
                     elif v == "Productividad_estimada":
-                        nombre_traza = "Target producto"
+                        nombre_traza = "Esperado producto"
+                    elif v == "Target_operativo_producto":
+                        nombre_traza = "Target operativo"
 
                 fig.add_trace(go.Scatter(
                     x=df_f["Fecha_y_hora"],
