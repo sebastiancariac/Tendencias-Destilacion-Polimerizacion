@@ -235,19 +235,40 @@ def aplicar_variables_calculadas_guardadas(df: pd.DataFrame, nombres_legibles: d
 
 
 def aplicar_agrupacion(df: pd.DataFrame, agrupacion: str) -> pd.DataFrame:
-    """Aplica agrupacion temporal por promedio. Si no agrupa, devuelve datos crudos."""
+    """
+    Aplica agrupacion temporal por promedio para variables numericas.
+
+    Si existe la columna Producto, conserva para cada periodo el producto dominante
+    (moda). Esto permite filtrar campañas y calcular targets por producto aun con
+    agrupacion diaria/semanal/mensual.
+    """
     if agrupacion == "Sin agrupación":
         return df.copy()
 
     freq_map = {"Hora": "h", "Día": "D", "Semana": "W", "Mes": "ME"}
     freq = freq_map[agrupacion]
-    return (
-        df.set_index("Fecha_y_hora")
+
+    df_idx = df.set_index("Fecha_y_hora")
+
+    df_num = (
+        df_idx
         .resample(freq)
         .mean(numeric_only=True)
         .asfreq(freq)
-        .reset_index()
     )
+
+    if "Producto" in df_idx.columns:
+        def _producto_dominante(serie):
+            s = serie.dropna().astype(str).str.strip()
+            s = s[s != ""]
+            if len(s) == 0:
+                return np.nan
+            return s.value_counts().idxmax()
+
+        producto_agrup = df_idx["Producto"].resample(freq).agg(_producto_dominante)
+        df_num["Producto"] = producto_agrup
+
+    return df_num.reset_index()
 
 
 def top_correlaciones(df: pd.DataFrame, variables: list, nombres_legibles: dict, metodo: str, min_puntos: int) -> pd.DataFrame:
@@ -505,6 +526,74 @@ def cargar_datos(
             "Descripcion Excel": descripciones_excel[col_excel],
             "Estado": "OK",
         })
+
+    # Columna opcional de producto/campaña.
+    # Se busca PRODUCTO de forma robusta porque no tiene TAG IP21.
+    # Importante: en algunos Excel la columna tiene muchas filas iniciales vacías,
+    # por eso no se valida solamente con las primeras filas de datos.
+    if normalizar_texto(hoja).startswith("polimer"):
+        col_producto = None
+
+        # 1) Buscar en descripciones, tags y primeras filas.
+        for idx in range(df_raw.shape[1]):
+            valores_header = []
+            for rr in range(min(6, df_raw.shape[0])):
+                valores_header.append(normalizar_texto(df_raw.iloc[rr, idx]))
+
+            desc_norm = normalizar_texto(descripciones_excel[idx]) if idx < len(descripciones_excel) else ""
+            tag_norm = normalizar_texto(tags_excel[idx]) if idx < len(tags_excel) else ""
+
+            if "producto" in valores_header or desc_norm == "producto" or tag_norm == "producto":
+                col_producto = idx
+                break
+
+        # 2) Fallback: si no lo encontró por header, tomar una columna llamada exactamente
+        # PRODUCTO si pandas/openpyxl la detectó desplazada en las primeras filas.
+        if col_producto is None:
+            for idx in range(df_raw.shape[1]):
+                serie_cabecera = df_raw.iloc[:10, idx].astype("string").str.strip().str.upper()
+                if (serie_cabecera == "PRODUCTO").any():
+                    col_producto = idx
+                    break
+
+        if col_producto is not None:
+            producto = df_datos.iloc[:, col_producto].astype("string").str.strip()
+
+            producto = producto.replace({
+                "": pd.NA,
+                "nan": pd.NA,
+                "None": pd.NA,
+                "NONE": pd.NA,
+                "NaN": pd.NA,
+                "<NA>": pd.NA,
+                "0": pd.NA,
+                "0.0": pd.NA,
+            })
+
+            # Asignar por posición para evitar problemas de índice.
+            df_out["Producto"] = producto.to_numpy()
+
+            filas_mapeo.append({
+                "Variable app": "Producto",
+                "Nombre": "Producto / campaña",
+                "TAG esperado": "Sin TAG",
+                "Columna Excel": col_producto + 1,
+                "TAG Excel": tags_excel[col_producto] if col_producto < len(tags_excel) else "",
+                "Descripcion Excel": descripciones_excel[col_producto] if col_producto < len(descripciones_excel) else "PRODUCTO",
+                "Estado": "OK",
+            })
+        else:
+            df_out["Producto"] = pd.NA
+            filas_mapeo.append({
+                "Variable app": "Producto",
+                "Nombre": "Producto / campaña",
+                "TAG esperado": "Sin TAG",
+                "Columna Excel": "NO ENCONTRADA",
+                "TAG Excel": "NO ENCONTRADO",
+                "Descripcion Excel": "NO ENCONTRADA",
+                "Estado": "ADVERTENCIA",
+            })
+
 
     df_out = df_out.dropna(subset=["Fecha_y_hora"])
     df_out = df_out.sort_values("Fecha_y_hora").reset_index(drop=True)
@@ -768,9 +857,9 @@ if unidad.startswith("Polimer") and all(
     # Las variables auxiliares del modelo de target se calculan internamente,
     # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
-        "Productividad_estimada": "Target productividad por familia [cat+MFI+H2+XS+propano]",
-        "Desvio_vs_productividad_estimada": "Desvio vs target por familia [Rendimiento - Target]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad target por familia [%]",
+        "Productividad_estimada": "Target por producto [top histórico]",
+        "Desvio_vs_productividad_estimada": "Desvio vs target por producto [Rendimiento - Target]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad target por producto [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -922,9 +1011,9 @@ modo_grafico = st.sidebar.radio("Modo:", options=["Separados", "Combinados"], in
 grafico_rendimiento_target = False
 if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimiento", "Productividad_estimada"]):
     grafico_rendimiento_target = st.sidebar.checkbox(
-        "Grafico combinado: Rendimiento vs Target",
+        "Grafico combinado: Rendimiento vs Target por producto",
         value=False,
-        help="Grafica solo Rendimiento y Target estimado, sin modificar la seleccion general de variables.",
+        help="Grafica solo Rendimiento y Target por producto, sin modificar la seleccion general de variables.",
     )
 
 st.sidebar.markdown("---")
@@ -1011,23 +1100,85 @@ vars_filtro = st.sidebar.multiselect(
 
 
 # ==============================================================================
+# FILTRO POR PRODUCTO / CAMPAÑA
+# ==============================================================================
+productos_sel = []
+
+if unidad.startswith("Polimer"):
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Filtro por producto")
+
+    if "Producto" in df.columns:
+        serie_producto = (
+            df["Producto"]
+            .astype("string")
+            .str.strip()
+            .replace({
+                "": pd.NA,
+                "nan": pd.NA,
+                "None": pd.NA,
+                "NONE": pd.NA,
+                "NaN": pd.NA,
+                "<NA>": pd.NA,
+                "0": pd.NA,
+                "0.0": pd.NA,
+            })
+        )
+
+        df["Producto"] = serie_producto
+
+        productos_disponibles = sorted([
+            str(p).strip()
+            for p in serie_producto.dropna().unique()
+            if str(p).strip()
+        ])
+
+        if productos_disponibles:
+            st.sidebar.caption(f"Productos detectados: {len(productos_disponibles)}")
+
+            productos_sel = st.sidebar.multiselect(
+                "Producto:",
+                options=productos_disponibles,
+                default=[],
+                help=(
+                    "Sin selección = todos los productos. Si seleccionás uno o más, "
+                    "la app filtra las campañas antes de agrupar y calcular el target."
+                ),
+            )
+
+            if productos_sel:
+                df = df[df["Producto"].astype(str).isin(productos_sel)].copy()
+                st.sidebar.caption(f"Productos seleccionados: {len(productos_sel)}")
+            else:
+                st.sidebar.caption("Sin selección: se incluyen todos los productos.")
+        else:
+            st.sidebar.warning(
+                "La columna PRODUCTO fue encontrada, pero no se detectaron valores no vacíos. "
+                "Verificá que el Excel cargado tenga productos escritos en la hoja POLIMERIZACIÓN."
+            )
+    else:
+        st.sidebar.warning(
+            "No se encontró la columna PRODUCTO. Cargá el Excel actualizado con la nueva columna PRODUCTO."
+        )
+
+
+# ==============================================================================
 # AGRUPACION Y FILTROS
 # ==============================================================================
 
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
-# AJUSTE FINAL POST-AGRUPACION TARGET OPTIMO POR FAMILIA
-# La familia se define sin nombres de producto:
-# - Tipo de catalizador dominante.
-# - MFI polvo.
-# - Concentracion de H2.
-# - XS.
-# - Concentracion de propano.
+# AJUSTE FINAL POST-AGRUPACION TARGET OPTIMO POR PRODUCTO
+# La referencia de rendimiento target se calcula por PRODUCTO/CAMPAÑA.
 #
-# Target:
-# - Para cada familia, usa el TOP 25% de rendimiento de esa familia.
-# - Si hay pocos datos, relaja a mismo catalizador.
-# - Si aun hay pocos datos, relaja a toda la base confiable.
+# Criterio:
+# - Base candidata: 28/04/2024-06/10/2024 + 01/05/2025-31/12/2025.
+# - Exclusión: 01/11/2024-30/04/2025 por evento de baja productividad/bajo nivel.
+# - Presión normal de base: 30.0 < P R-2301 < 31.0 bar.
+# - Para cada producto, se toma el TOP 25% de rendimiento de ese mismo producto.
+# - Si el producto no aparece suficiente en la base confiable, se busca el mejor
+#   histórico del mismo producto en todo el rango con presión normal.
+# - No mezcla productos distintos para definir el target.
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
     for col in [
@@ -1035,11 +1186,7 @@ if unidad.startswith("Polimer") and all(
         "Rendimiento",
         "Presion_R2301",
         "Productividad_estimada",
-        "MFI_polvo",
-        "Conc_H2",
-        "Conc_propano",
-        "XS",
-        "Tipo_catalizador_productividad",
+        "Producto",
     ]
 ):
     _fecha = pd.to_datetime(df_agrup["Fecha_y_hora"], errors="coerce")
@@ -1062,385 +1209,136 @@ if unidad.startswith("Polimer") and all(
     _periodo_base = (_base_2024 | _base_2025) & (~_periodo_excluido)
 
     _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
-    _presion_ok = (_presion >= 30.0) & (_presion <= 31.0)
+    _presion_ok = (_presion > 30.0) & (_presion < 31.0)
 
-    # Base confiable para construir familias y target.
-    _base_general = df_agrup.loc[
+    _producto = (
+        df_agrup["Producto"]
+        .astype("string")
+        .str.strip()
+        .replace({
+            "": pd.NA,
+            "nan": pd.NA,
+            "None": pd.NA,
+            "NONE": pd.NA,
+            "NaN": pd.NA,
+            "0": pd.NA,
+            "0.0": pd.NA,
+        })
+    )
+    df_agrup["Producto"] = _producto
+
+    _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
+
+    _base_confiable = df_agrup.loc[
         _periodo_base
         & _presion_ok
-        & df_agrup["Rendimiento"].notna()
-        & df_agrup["MFI_polvo"].notna()
-        & df_agrup["Conc_H2"].notna()
-        & df_agrup["Conc_propano"].notna()
-        & df_agrup["XS"].notna()
-        & df_agrup["Tipo_catalizador_productividad"].notna()
+        & _rendimiento.notna()
+        & df_agrup["Producto"].notna()
     ].copy()
 
-    if len(_base_general) > 0:
-        for _col in [
-            "Rendimiento",
-            "MFI_polvo",
-            "Conc_H2",
-            "Conc_propano",
-            "XS",
-            "Tipo_catalizador_productividad",
-        ]:
-            _base_general[_col] = pd.to_numeric(_base_general[_col], errors="coerce")
+    _base_respaldo = df_agrup.loc[
+        _presion_ok
+        & _rendimiento.notna()
+        & df_agrup["Producto"].notna()
+        & (~_periodo_excluido)
+    ].copy()
 
-        _base_general = _base_general.dropna(
-            subset=[
-                "Rendimiento",
-                "MFI_polvo",
-                "Conc_H2",
-                "XS",
-                "Tipo_catalizador_productividad",
-            ]
+    _pred = np.full(len(df_agrup), np.nan)
+    _conf = np.full(len(df_agrup), np.nan)
+    _target_flag = np.zeros(len(df_agrup))
+    _percentil_base = np.full(len(df_agrup), np.nan)
+
+    # Distancia se mantiene como 0 para puntos target y NaN para el resto,
+    # porque el target por producto es un valor histórico de referencia,
+    # no una distancia multivariable.
+    _dist_min = np.full(len(df_agrup), np.nan)
+
+    if len(_base_confiable) > 0:
+        _base_confiable["Percentil_rendimiento_base"] = (
+            _base_confiable.groupby("Producto")["Rendimiento"]
+            .rank(pct=True)
+            * 100.0
         )
 
-    if len(_base_general) > 0:
-        # Bins por cuantiles de la base confiable.
-        def _bin_por_cuantiles(_serie, _q1, _q2):
-            return np.select(
-                [
-                    _serie <= _q1,
-                    _serie <= _q2,
-                ],
-                [
-                    0.0,
-                    1.0,
-                ],
-                default=2.0,
-            )
+        _idx_base = _base_confiable.index.intersection(df_agrup.index)
+        _percentil_base[df_agrup.index.get_indexer(_idx_base)] = _base_confiable.loc[
+            _idx_base,
+            "Percentil_rendimiento_base",
+        ].to_numpy(dtype=float)
 
-        _mfi_q1 = _base_general["MFI_polvo"].quantile(0.33)
-        _mfi_q2 = _base_general["MFI_polvo"].quantile(0.66)
+    _productos = sorted([
+        str(p)
+        for p in df_agrup["Producto"].dropna().astype(str).unique()
+        if str(p).strip()
+    ])
 
-        _h2_q1 = _base_general["Conc_H2"].quantile(0.33)
-        _h2_q2 = _base_general["Conc_H2"].quantile(0.66)
+    for _prod in _productos:
+        _idx_prod = df_agrup.index[df_agrup["Producto"].astype(str) == str(_prod)]
 
-        _prop_q1 = _base_general["Conc_propano"].quantile(0.33)
-        _prop_q2 = _base_general["Conc_propano"].quantile(0.66)
-
-        _xs_q1 = _base_general["XS"].quantile(0.33)
-        _xs_q2 = _base_general["XS"].quantile(0.66)
-
-        df_agrup["MFI_bin_productividad"] = _bin_por_cuantiles(
-            pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce"),
-            _mfi_q1,
-            _mfi_q2,
-        )
-
-        df_agrup["H2_bin_productividad"] = _bin_por_cuantiles(
-            pd.to_numeric(df_agrup["Conc_H2"], errors="coerce"),
-            _h2_q1,
-            _h2_q2,
-        )
-
-        df_agrup["Propano_bin_productividad"] = _bin_por_cuantiles(
-            pd.to_numeric(df_agrup["Conc_propano"], errors="coerce"),
-            _prop_q1,
-            _prop_q2,
-        )
-
-        df_agrup["XS_bin_productividad"] = _bin_por_cuantiles(
-            pd.to_numeric(df_agrup["XS"], errors="coerce"),
-            _xs_q1,
-            _xs_q2,
-        )
-
-        df_agrup.loc[df_agrup["MFI_polvo"].isna(), "MFI_bin_productividad"] = np.nan
-        df_agrup.loc[df_agrup["Conc_H2"].isna(), "H2_bin_productividad"] = np.nan
-        df_agrup.loc[df_agrup["Conc_propano"].isna(), "Propano_bin_productividad"] = np.nan
-        df_agrup.loc[df_agrup["XS"].isna(), "XS_bin_productividad"] = np.nan
-
-        df_agrup["Familia_productividad_codigo"] = (
-            10000.0 * pd.to_numeric(df_agrup["Tipo_catalizador_productividad"], errors="coerce")
-            + 1000.0 * pd.to_numeric(df_agrup["MFI_bin_productividad"], errors="coerce")
-            + 100.0 * pd.to_numeric(df_agrup["H2_bin_productividad"], errors="coerce")
-            + 10.0 * pd.to_numeric(df_agrup["XS_bin_productividad"], errors="coerce")
-            + pd.to_numeric(df_agrup["Propano_bin_productividad"], errors="coerce")
-        )
-
-        # Recalcular base con bins/familia ya definidos.
-        _base = df_agrup.loc[
-            _periodo_base
-            & _presion_ok
-            & df_agrup["Rendimiento"].notna()
-            & df_agrup["Familia_productividad_codigo"].notna()
+        _pool = _base_confiable.loc[
+            _base_confiable["Producto"].astype(str) == str(_prod)
         ].copy()
 
-        _features_candidatas = [
-            # Variables de familia/producto
-            "Tipo_catalizador_productividad",
-            "MFI_polvo",
-            "Conc_H2",
-            "XS",
-            "MFI_bin_productividad",
-            "H2_bin_productividad",
-            "XS_bin_productividad",
-            "Propano_bin_productividad",
-            "Familia_productividad_codigo",
+        _usa_respaldo = False
 
-            # Calidad adicional
-            "MFI_pellets",
-            "Delta_MFI_polvo_pellets",
-            "Conc_propano",
-            "Ratio_H2_propano",
+        # Si hay pocos puntos en la base principal, usar respaldo del mismo producto
+        # en todo el rango de operación normal, excluyendo el evento de bajo nivel.
+        if len(_pool) < 3:
+            _pool = _base_respaldo.loc[
+                _base_respaldo["Producto"].astype(str) == str(_prod)
+            ].copy()
+            _usa_respaldo = True
 
-            # Estado reactor
-            "Presion_R2301",
-            "Temperatura_R2301",
-            "Nivel_R2301",
-            "Slurry",
+        if len(_pool) == 0:
+            continue
 
-            # Carga / remocion de calor
-            "Caudal_alim_R2301",
-            "Caudal_fresco",
-            "Calor_reaccion_URA",
-            "Gases_tope_R2301",
-            "Caudal_E2301A",
-            "Caudal_E2301B",
-            "Caudal_E2301C",
-            "Carga_condensadores",
-            "Caudal_CW",
-            "Sumatoria_condensadores",
+        _rend_pool = pd.to_numeric(_pool["Rendimiento"], errors="coerce").dropna()
 
-            # Purga / salida
-            "Caudal_purga",
-            "Salida_fondo_R2301",
-            "Gas_S2402_S2404",
+        if len(_rend_pool) == 0:
+            continue
 
-            # Catalizador / co-catalizadores
-            "Caudal_ZN306_activo",
-            "Caudal_ZN389_activo",
-            "Caudal_catalizador_activo",
-            "Fraccion_ZN389_activo",
-            "TEA",
-            "C_Donor",
-            "Rel_TEA_CDonor",
-            "Rel_TEA_CDonor_calc",
-            "Alcohol",
+        # Target = promedio del top 25% del rendimiento del mismo producto.
+        # Para productos con pocos datos, usa el máximo histórico del producto.
+        if len(_rend_pool) >= 4:
+            _umbral = _rend_pool.quantile(0.75)
+            _target_vals = _rend_pool.loc[_rend_pool >= _umbral]
+            _target_val = float(_target_vals.mean())
+        else:
+            _target_val = float(_rend_pool.max())
 
-            # Hidrogeno
-            "H2_a_K2301",
-            "H2_a_R2301",
-            "H2_total",
-        ]
+        _pos_prod = df_agrup.index.get_indexer(_idx_prod)
+        _pred[_pos_prod] = _target_val
 
-        _features = [c for c in _features_candidatas if c in df_agrup.columns]
+        # Confiabilidad simple por cantidad de datos del mismo producto.
+        _n = len(_rend_pool)
+        _conf_val = min(100.0, 35.0 + 8.0 * _n)
 
-        for _col in _features + ["Rendimiento"]:
-            _base[_col] = pd.to_numeric(_base[_col], errors="coerce")
+        if _usa_respaldo:
+            _conf_val = min(_conf_val, 70.0)
 
-        _base = _base.dropna(subset=["Rendimiento", "Familia_productividad_codigo"])
+        # Penaliza puntos fuera de presión normal, pero mantiene target visible.
+        _pres_ok_prod = _presion_ok.loc[_idx_prod].to_numpy()
+        _conf[_pos_prod] = np.where(_pres_ok_prod, _conf_val, _conf_val * 0.4)
 
-        if len(_base) > 0:
-            _rend_base = pd.to_numeric(_base["Rendimiento"], errors="coerce")
-            _base["Percentil_rendimiento_base"] = _rend_base.rank(pct=True) * 100.0
+        # Marcar puntos que están en el top histórico usado como target.
+        _pool_target = _pool.loc[pd.to_numeric(_pool["Rendimiento"], errors="coerce") >= _target_val * 0.995]
+        _idx_target = _pool_target.index.intersection(df_agrup.index)
+        _pos_target = df_agrup.index.get_indexer(_idx_target)
+        _target_flag[_pos_target] = 1.0
+        _dist_min[_pos_target] = 0.0
+        _conf[_pos_target] = 100.0
 
-            _pred = np.full(len(df_agrup), np.nan)
-            _dist_min = np.full(len(df_agrup), np.nan)
-            _conf = np.full(len(df_agrup), np.nan)
-            _target_flag = np.zeros(len(df_agrup))
-            _percentil_base = np.full(len(df_agrup), np.nan)
+        # En los puntos históricos target, mantener el target como su rendimiento real.
+        _pred[_pos_target] = pd.to_numeric(
+            df_agrup.loc[_idx_target, "Rendimiento"],
+            errors="coerce",
+        ).to_numpy(dtype=float)
 
-            _idx_base = _base.index.intersection(df_agrup.index)
-            _percentil_base[df_agrup.index.get_indexer(_idx_base)] = _base.loc[
-                _idx_base,
-                "Percentil_rendimiento_base",
-            ].to_numpy(dtype=float)
-
-            _features_validas_global = [
-                _col for _col in _features
-                if _base[_col].notna().sum() > 0
-            ]
-
-            if len(_features_validas_global) > 0:
-                # Funcion local para calcular target de un subconjunto.
-                def _calcular_para_pool(_idx_actuales, _pool, _target_pool):
-                    if len(_idx_actuales) == 0 or len(_target_pool) == 0:
-                        return
-
-                    _features_validas = [
-                        _col for _col in _features_validas_global
-                        if _target_pool[_col].notna().sum() > 0
-                    ]
-
-                    if len(_features_validas) == 0:
-                        return
-
-                    _x_target_df = _target_pool[_features_validas].copy()
-
-                    _med = _x_target_df.median(axis=0, skipna=True)
-                    _q75 = _x_target_df.quantile(0.75)
-                    _q25 = _x_target_df.quantile(0.25)
-
-                    _escala = (_q75 - _q25).replace(0, np.nan)
-                    _escala = _escala.fillna(_x_target_df.std(axis=0, skipna=True))
-                    _escala = _escala.replace(0, 1.0).fillna(1.0)
-
-                    _x_target_df = _x_target_df.fillna(_med)
-
-                    _x_train = _x_target_df.to_numpy(dtype=float)
-                    _y_train = pd.to_numeric(_target_pool["Rendimiento"], errors="coerce").to_numpy(dtype=float)
-
-                    _ok_train = np.isfinite(_x_train).all(axis=1) & np.isfinite(_y_train)
-                    _x_train = _x_train[_ok_train]
-                    _y_train = _y_train[_ok_train]
-
-                    if len(_x_train) == 0:
-                        return
-
-                    _med_np = _med.to_numpy(dtype=float)
-                    _escala_np = _escala.to_numpy(dtype=float)
-
-                    _pesos = []
-                    for _f in _features_validas:
-                        if _f in [
-                            "Tipo_catalizador_productividad",
-                            "MFI_polvo",
-                            "Conc_H2",
-                            "XS",
-                            "MFI_bin_productividad",
-                            "H2_bin_productividad",
-                            "XS_bin_productividad",
-                            "Propano_bin_productividad",
-                            "Familia_productividad_codigo",
-                            "Fraccion_ZN389_activo",
-                        ]:
-                            _pesos.append(2.2)
-                        elif _f in [
-                            "Caudal_ZN306_activo",
-                            "Caudal_ZN389_activo",
-                            "Caudal_catalizador_activo",
-                            "TEA",
-                            "C_Donor",
-                            "Rel_TEA_CDonor",
-                            "Rel_TEA_CDonor_calc",
-                            "Alcohol",
-                        ]:
-                            _pesos.append(1.5)
-                        elif _f in [
-                            "Nivel_R2301",
-                            "Slurry",
-                            "Presion_R2301",
-                            "Temperatura_R2301",
-                            "Caudal_alim_R2301",
-                            "Caudal_fresco",
-                            "Calor_reaccion_URA",
-                        ]:
-                            _pesos.append(1.2)
-                        else:
-                            _pesos.append(1.0)
-
-                    _pesos = np.array(_pesos, dtype=float)
-
-                    _x_train_s = ((_x_train - _med_np) / _escala_np) * np.sqrt(_pesos)
-
-                    _x_all_df = df_agrup.loc[_idx_actuales, _features_validas].copy()
-
-                    for _col in _features_validas:
-                        _x_all_df[_col] = pd.to_numeric(_x_all_df[_col], errors="coerce")
-
-                    _x_all_df = _x_all_df.fillna(_med)
-                    _x_all = _x_all_df.to_numpy(dtype=float)
-
-                    _valid_local = np.isfinite(_x_all).all(axis=1)
-
-                    if not np.any(_valid_local):
-                        return
-
-                    _idx_validos = np.array(list(_idx_actuales))[_valid_local]
-                    _x_validos = _x_all[_valid_local]
-
-                    _k = min(7, len(_y_train))
-                    _bloque = 1000
-
-                    for _i0 in range(0, len(_idx_validos), _bloque):
-                        _idx_chunk = _idx_validos[_i0:_i0 + _bloque]
-                        _x_chunk = _x_validos[_i0:_i0 + _bloque]
-
-                        _x_chunk_s = ((_x_chunk - _med_np) / _escala_np) * np.sqrt(_pesos)
-
-                        _dist = (
-                            (_x_chunk_s[:, None, :] - _x_train_s[None, :, :]) ** 2
-                        ).sum(axis=2)
-
-                        _orden = np.argsort(_dist, axis=1)[:, :_k]
-                        _dist_k = np.take_along_axis(_dist, _orden, axis=1)
-                        _y_k = _y_train[_orden]
-
-                        _w = 1.0 / (_dist_k + 1e-6)
-                        _pred_local = (_w * _y_k).sum(axis=1) / _w.sum(axis=1)
-
-                        _dmin = _dist_k[:, 0]
-                        _conf_local = 100.0 * np.exp(
-                            -_dmin / max(len(_features_validas), 1)
-                        )
-
-                        _pos = df_agrup.index.get_indexer(_idx_chunk)
-                        _pred[_pos] = _pred_local
-                        _dist_min[_pos] = _dmin
-
-                        _pres_ok_chunk = _presion_ok.loc[_idx_chunk].to_numpy()
-                        _conf_local = np.where(_pres_ok_chunk, _conf_local, _conf_local * 0.40)
-                        _conf[_pos] = _conf_local
-
-                # Calcular por familia exacta.
-                _familias = sorted([
-                    f for f in df_agrup["Familia_productividad_codigo"].dropna().unique()
-                ])
-
-                for _fam in _familias:
-                    _idx_actuales = df_agrup.index[
-                        df_agrup["Familia_productividad_codigo"] == _fam
-                    ]
-
-                    _pool = _base.loc[_base["Familia_productividad_codigo"] == _fam].copy()
-
-                    # Si la familia exacta tiene pocos puntos, relajar a mismo catalizador.
-                    if len(_pool) < 8:
-                        _cat_actual = np.floor(float(_fam) / 10000.0)
-                        _pool = _base.loc[
-                            _base["Tipo_catalizador_productividad"] == _cat_actual
-                        ].copy()
-
-                    # Si sigue siendo poco, usar toda la base confiable.
-                    if len(_pool) < 8:
-                        _pool = _base.copy()
-
-                    _rend_pool = pd.to_numeric(_pool["Rendimiento"], errors="coerce")
-                    _umbral = _rend_pool.quantile(0.75)
-                    _target_pool = _pool.loc[_rend_pool >= _umbral].copy()
-
-                    if len(_target_pool) < min(5, max(3, len(_pool) // 5)):
-                        _umbral = _rend_pool.quantile(0.65)
-                        _target_pool = _pool.loc[_rend_pool >= _umbral].copy()
-
-                    if len(_target_pool) < 3:
-                        _target_pool = _pool.copy()
-
-                    _calcular_para_pool(_idx_actuales, _pool, _target_pool)
-
-                    # Marcar target optimo historico.
-                    _idx_target = _target_pool.index.intersection(df_agrup.index)
-                    _pos_target = df_agrup.index.get_indexer(_idx_target)
-                    _target_flag[_pos_target] = 1.0
-
-                    # Para puntos target historicos, target = rendimiento real.
-                    _pred[_pos_target] = pd.to_numeric(
-                        df_agrup.loc[_idx_target, "Rendimiento"],
-                        errors="coerce",
-                    ).to_numpy(dtype=float)
-
-                    _dist_min[_pos_target] = 0.0
-                    _conf[_pos_target] = 100.0
-
-                df_agrup["Productividad_estimada"] = pd.Series(_pred, index=df_agrup.index)
-                df_agrup["Distancia_benchmark_productividad"] = pd.Series(_dist_min, index=df_agrup.index)
-                df_agrup["Confiabilidad_benchmark_productividad"] = pd.Series(_conf, index=df_agrup.index)
-                df_agrup["Indicador_target_optimo_productividad"] = pd.Series(_target_flag, index=df_agrup.index)
-                df_agrup["Percentil_rendimiento_base"] = pd.Series(_percentil_base, index=df_agrup.index)
+    df_agrup["Productividad_estimada"] = pd.Series(_pred, index=df_agrup.index)
+    df_agrup["Distancia_benchmark_productividad"] = pd.Series(_dist_min, index=df_agrup.index)
+    df_agrup["Confiabilidad_benchmark_productividad"] = pd.Series(_conf, index=df_agrup.index)
+    df_agrup["Indicador_target_optimo_productividad"] = pd.Series(_target_flag, index=df_agrup.index)
+    df_agrup["Percentil_rendimiento_base"] = pd.Series(_percentil_base, index=df_agrup.index)
 
     if "Desvio_vs_productividad_estimada" in df_agrup.columns:
         df_agrup["Desvio_vs_productividad_estimada"] = (
@@ -1453,7 +1351,6 @@ if unidad.startswith("Polimer") and all(
 
     if "Periodo_base_productividad_2024" in df_agrup.columns:
         df_agrup["Periodo_base_productividad_2024"] = np.where(_periodo_base, 1.0, 0.0)
-
 
 
 # Mascara inicial: rango de fechas
@@ -1725,7 +1622,7 @@ with tab1:
         st.info("Selecciona al menos una variable en el panel lateral.")
     else:
         if grafico_rendimiento_target:
-            st.caption("Vista rapida: Rendimiento real vs Target estimado. Esta opcion no cambia la seleccion general de variables.")
+            st.caption("Vista rapida: Rendimiento real vs Target por producto. Esta opcion no cambia la seleccion general de variables.")
 
         if modo_grafico_efectivo == "Combinados":
             fig = go.Figure()
@@ -1738,7 +1635,7 @@ with tab1:
                     if v == "Rendimiento":
                         nombre_traza = "Rendimiento real"
                     elif v == "Productividad_estimada":
-                        nombre_traza = "Target productividad"
+                        nombre_traza = "Target producto"
 
                 fig.add_trace(go.Scatter(
                     x=df_f["Fecha_y_hora"],
