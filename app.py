@@ -842,7 +842,7 @@ if unidad.startswith("Polimer") and all(
 
     # Se inicializa. El calculo final se hace despues de la agrupacion temporal.
     # Nombres historicos mantenidos para compatibilidad:
-    # - Productividad_estimada = Rendimiento esperado por producto.
+    # - Productividad_estimada = Rendimiento estimado.
     # - Desvio_vs_productividad_estimada = Rendimiento real - Rendimiento esperado.
     df["Productividad_estimada"] = np.nan
     df["Rendimiento_esperado_producto"] = np.nan
@@ -865,12 +865,9 @@ if unidad.startswith("Polimer") and all(
     # Las variables auxiliares del modelo de target se calculan internamente,
     # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
-        "Productividad_estimada": "Rendimiento esperado por producto",
-        "Target_operativo_producto": "Target operativo por producto [P90]",
-        "Maximo_historico_validado_producto": "Maximo historico validado por producto",
-        "Desvio_vs_productividad_estimada": "Desvio vs rendimiento esperado [Rendimiento - Esperado]",
-        "Gap_vs_target_operativo": "Gap vs target operativo [Rendimiento - Target]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad referencia por producto [%]",
+        "Productividad_estimada": "Rendimiento estimado",
+        "Desvio_vs_productividad_estimada": "Desvio vs rendimiento estimado [Real - Estimado]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad estimacion por producto [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1020,11 +1017,11 @@ st.sidebar.subheader("Modo de grafico")
 modo_grafico = st.sidebar.radio("Modo:", options=["Separados", "Combinados"], index=0)
 
 grafico_rendimiento_target = False
-if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimiento", "Productividad_estimada", "Target_operativo_producto"]):
+if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimiento", "Productividad_estimada"]):
     grafico_rendimiento_target = st.sidebar.checkbox(
-        "Grafico combinado: Rendimiento vs esperado/target",
+        "Grafico combinado: Rendimiento real vs estimado",
         value=False,
-        help="Grafica solo Rendimiento real, Rendimiento esperado y Target operativo por producto, sin modificar la seleccion general de variables.",
+        help="Grafica solo Rendimiento real y Rendimiento estimado, sin modificar la seleccion general de variables.",
     )
 
 st.sidebar.markdown("---")
@@ -1182,7 +1179,7 @@ df_agrup = aplicar_agrupacion(df, agrupacion)
 # AJUSTE FINAL POST-AGRUPACION REFERENCIAS DE RENDIMIENTO POR PRODUCTO
 # Referencias calculadas por PRODUCTO/CAMPAÑA, sin mezclar productos:
 #
-# - Rendimiento esperado por producto:
+# - Rendimiento estimado:
 #   mediana robusta del historico confiable del mismo producto.
 #
 # - Target operativo por producto:
@@ -1374,7 +1371,7 @@ if unidad.startswith("Polimer") and all(
         _conf[_pos_target] = 100.0
 
     # Nombres historicos mantenidos:
-    # Productividad_estimada = Rendimiento esperado por producto.
+    # Productividad_estimada = Rendimiento estimado.
     df_agrup["Productividad_estimada"] = pd.Series(_esperado, index=df_agrup.index)
     df_agrup["Rendimiento_esperado_producto"] = pd.Series(_esperado, index=df_agrup.index)
     df_agrup["Target_operativo_producto"] = pd.Series(_target, index=df_agrup.index)
@@ -1664,7 +1661,7 @@ with tab1:
     st.subheader(f"{unidad} - Tendencias ({agrupacion.lower()})")
 
     if grafico_rendimiento_target:
-        variables_grafico = ["Rendimiento", "Productividad_estimada", "Target_operativo_producto"]
+        variables_grafico = ["Rendimiento", "Productividad_estimada"]
         modo_grafico_efectivo = "Combinados"
     else:
         variables_grafico = variables_sel
@@ -1676,7 +1673,7 @@ with tab1:
         st.info("Selecciona al menos una variable en el panel lateral.")
     else:
         if grafico_rendimiento_target:
-            st.caption("Vista rapida: Rendimiento real vs rendimiento esperado y target operativo por producto. Esta opcion no cambia la seleccion general de variables.")
+            st.caption("Vista rapida: Rendimiento real vs rendimiento estimado por producto. Esta opcion no cambia la seleccion general de variables.")
 
         if modo_grafico_efectivo == "Combinados":
             fig = go.Figure()
@@ -1689,9 +1686,7 @@ with tab1:
                     if v == "Rendimiento":
                         nombre_traza = "Rendimiento real"
                     elif v == "Productividad_estimada":
-                        nombre_traza = "Esperado producto"
-                    elif v == "Target_operativo_producto":
-                        nombre_traza = "Target operativo"
+                        nombre_traza = "Rendimiento estimado"
 
                 fig.add_trace(go.Scatter(
                     x=df_f["Fecha_y_hora"],
