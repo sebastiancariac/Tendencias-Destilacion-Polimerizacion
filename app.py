@@ -409,7 +409,7 @@ def normalizar_producto_operativo(producto):
     """
     Normaliza el producto para análisis de campañas.
     Regla solicitada:
-    - Todos los productos KFM se agrupan como KFM, aunque tengan sufijos TE.
+    - Todos los productos KFM se agrupan como KFM6110, aunque tengan sufijos TE.
     - El resto queda igual, salvo limpieza básica de espacios.
     """
     if producto is None or pd.isna(producto):
@@ -890,7 +890,7 @@ if unidad.startswith("Polimer") and all(
     variables_productividad = {
         "Productividad_estimada": "Rendimiento estimado",
         "Desvio_vs_productividad_estimada": "Desvio vs rendimiento estimado [Real - Estimado]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad estimacion por producto [%]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad estimacion producto/condicion [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1199,34 +1199,27 @@ if unidad.startswith("Polimer"):
 
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
-# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR PRODUCTO
-# Referencia calculada por PRODUCTO/CAMPAÑA, sin mezclar productos.
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR PRODUCTO Y CONDICION OPERATIVA
+# La estimación se calcula sin mezclar productos distintos.
 #
-# Cambio aplicado:
-# - Todos los productos KFM se agrupan como "KFM", aunque tengan sufijos TE.
-# - El rendimiento estimado ya no es la mediana de todo el histórico,
-#   porque para KFM quedaba demasiado bajo respecto de campañas buenas recientes.
-# - Ahora se calcula como promedio robusto de los mejores puntos confiables
-#   del mismo producto:
-#     * Si hay >= 10 puntos: promedio del TOP 10%.
-#     * Si hay 5 a 9 puntos: promedio del TOP 25%.
-#     * Si hay < 5 puntos: máximo histórico confiable del mismo producto.
+# Criterio principal:
+# - Se usa PRODUCTO como primera clasificación.
+# - Los KFM se agrupan como KFM6110.
+# - Dentro del mismo producto, se compara cada punto contra campañas históricas
+#   confiables considerando variables de proceso/calidad:
+#     Conc_propano, MFI, Slurry, C-Donor, TEA/C-Donor, H2, XS,
+#     catalizador, nivel, presión, URA, temperatura y carga.
 #
-# Interpretación:
-# - Rendimiento real > Rendimiento estimado:
-#   campaña por encima de la referencia estimada.
-# - Rendimiento real < Rendimiento estimado:
-#   campaña por debajo de la referencia estimada.
+# Para evitar que campañas históricas antiguas con baja performance bajen
+# artificialmente la referencia, la estimación toma una referencia alta pero
+# condicionada:
+# - Referencia local por similitud: bloque superior de los puntos históricos más
+#   parecidos del mismo producto.
+# - Piso de producto: P90 histórico confiable del mismo producto.
+# - Rendimiento_estimado = max(referencia_local, piso_producto).
 #
-# Base candidata:
-# - 28/04/2024-06/10/2024 + 01/05/2025-31/12/2025.
-# - Se excluye 01/11/2024-30/04/2025 por evento de baja productividad/bajo nivel.
-# - Se priorizan condiciones confiables de operación:
-#   30 < Presion_R2301 < 31
-#   60 < Nivel_R2301 < 70, si existe
-#   8000 < Calor_reaccion_URA < 13000, si existe
-#   MFI_polvo > 0, si existe
-#   Slurry > 50, si existe
+# Esto no es un "máximo absoluto" ni un target declarado; es una referencia
+# operativa esperada-alta para condiciones comparables.
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
     for col in [
@@ -1279,8 +1272,64 @@ if unidad.startswith("Polimer") and all(
 
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
 
+    # Variables derivadas adicionales para la estimación, por si no quedaron
+    # calculadas antes de la agrupación.
+    if "Ratio_H2_propano" not in df_agrup.columns and all(
+        c in df_agrup.columns for c in ["Conc_H2", "Conc_propano"]
+    ):
+        df_agrup["Ratio_H2_propano"] = (
+            pd.to_numeric(df_agrup["Conc_H2"], errors="coerce")
+            / pd.to_numeric(df_agrup["Conc_propano"], errors="coerce")
+        ).replace([np.inf, -np.inf], np.nan)
+
+    if "Rel_TEA_CDonor_calc" not in df_agrup.columns and all(
+        c in df_agrup.columns for c in ["TEA", "C_Donor"]
+    ):
+        df_agrup["Rel_TEA_CDonor_calc"] = (
+            pd.to_numeric(df_agrup["TEA"], errors="coerce")
+            / pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
+        ).replace([np.inf, -np.inf], np.nan)
+
+    if "Caudal_catalizador_activo" not in df_agrup.columns and all(
+        c in df_agrup.columns
+        for c in ["Catalizador_A", "Catalizador_B", "Presion_cat_2209A", "Presion_cat_2209B"]
+    ):
+        _cat_a = pd.to_numeric(df_agrup["Catalizador_A"], errors="coerce")
+        _cat_b = pd.to_numeric(df_agrup["Catalizador_B"], errors="coerce")
+        _p_cat_a = pd.to_numeric(df_agrup["Presion_cat_2209A"], errors="coerce")
+        _p_cat_b = pd.to_numeric(df_agrup["Presion_cat_2209B"], errors="coerce")
+
+        df_agrup["Caudal_ZN306_activo"] = np.where(_p_cat_b >= 30.0, _cat_b, 0.0)
+        df_agrup["Caudal_ZN389_activo"] = np.where(_p_cat_a >= 30.0, _cat_a, 0.0)
+        df_agrup["Caudal_catalizador_activo"] = (
+            pd.to_numeric(df_agrup["Caudal_ZN306_activo"], errors="coerce")
+            + pd.to_numeric(df_agrup["Caudal_ZN389_activo"], errors="coerce")
+        )
+        df_agrup.loc[df_agrup["Caudal_catalizador_activo"] <= 0, "Caudal_catalizador_activo"] = np.nan
+
+    if "Fraccion_ZN389_activo" not in df_agrup.columns and all(
+        c in df_agrup.columns for c in ["Caudal_ZN389_activo", "Caudal_catalizador_activo"]
+    ):
+        df_agrup["Fraccion_ZN389_activo"] = (
+            pd.to_numeric(df_agrup["Caudal_ZN389_activo"], errors="coerce")
+            / pd.to_numeric(df_agrup["Caudal_catalizador_activo"], errors="coerce")
+        ).replace([np.inf, -np.inf], np.nan)
+
+    if "H2_total" not in df_agrup.columns and all(
+        c in df_agrup.columns for c in ["H2_a_K2301", "H2_a_R2301"]
+    ):
+        df_agrup["H2_total"] = (
+            pd.to_numeric(df_agrup["H2_a_K2301"], errors="coerce")
+            + pd.to_numeric(df_agrup["H2_a_R2301"], errors="coerce")
+        )
+
     # Filtro de calidad de datos para construir la referencia.
-    _calidad_base = _periodo_base & _presion_ok & _rendimiento.notna() & df_agrup["Producto"].notna()
+    _calidad_base = (
+        _periodo_base
+        & _presion_ok
+        & _rendimiento.notna()
+        & df_agrup["Producto"].notna()
+    )
 
     if "Nivel_R2301" in df_agrup.columns:
         _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
@@ -1300,19 +1349,20 @@ if unidad.startswith("Polimer") and all(
 
     _base_confiable = df_agrup.loc[_calidad_base].copy()
 
-    # Respaldo: mismo producto en operación normal y fuera del periodo excluido.
-    # Se usa solo cuando el producto tiene muy pocos puntos en la base principal.
-    _base_respaldo_mask = _presion_ok & _rendimiento.notna() & df_agrup["Producto"].notna() & (~_periodo_excluido)
+    # Respaldo: mismo producto en operación normal y fuera del período excluido.
+    _base_respaldo_mask = (
+        _presion_ok
+        & _rendimiento.notna()
+        & df_agrup["Producto"].notna()
+        & (~_periodo_excluido)
+    )
     _base_respaldo = df_agrup.loc[_base_respaldo_mask].copy()
 
     _estimado = np.full(len(df_agrup), np.nan)
     _conf = np.full(len(df_agrup), np.nan)
     _percentil_base = np.full(len(df_agrup), np.nan)
-
-    # Variables internas mantenidas por compatibilidad, pero no visibles.
-    _target_flag = np.zeros(len(df_agrup))
     _dist_min = np.full(len(df_agrup), np.nan)
-    _maximo = np.full(len(df_agrup), np.nan)
+    _target_flag = np.zeros(len(df_agrup))
 
     if len(_base_confiable) > 0:
         _base_confiable["Percentil_rendimiento_base"] = (
@@ -1326,6 +1376,43 @@ if unidad.startswith("Polimer") and all(
             _idx_base,
             "Percentil_rendimiento_base",
         ].to_numpy(dtype=float)
+
+    _features_candidatas = [
+        # Producto / calidad
+        "Conc_propano",
+        "MFI_polvo",
+        "MFI_pellets",
+        "Slurry",
+        "C_Donor",
+        "Rel_TEA_CDonor",
+        "Rel_TEA_CDonor_calc",
+        "TEA",
+        "Conc_H2",
+        "Ratio_H2_propano",
+        "XS",
+
+        # Catalizador / actividad
+        "Caudal_catalizador_activo",
+        "Caudal_ZN306_activo",
+        "Caudal_ZN389_activo",
+        "Fraccion_ZN389_activo",
+        "Catalizador_A",
+        "Catalizador_B",
+
+        # Estado reactor / carga
+        "Nivel_R2301",
+        "Presion_R2301",
+        "Calor_reaccion_URA",
+        "Temperatura_R2301",
+        "Caudal_alim_R2301",
+        "Caudal_fresco",
+        "Caudal_purga",
+        "Produccion_PP",
+        "Gases_tope_R2301",
+        "H2_total",
+        "H2_a_K2301",
+        "H2_a_R2301",
+    ]
 
     _productos = sorted([
         str(p)
@@ -1342,9 +1429,7 @@ if unidad.startswith("Polimer") and all(
 
         _usa_respaldo = False
 
-        # Si hay pocos puntos confiables, se usa respaldo del mismo producto,
-        # pero nunca se mezclan productos distintos.
-        if len(_pool) < 3:
+        if len(_pool) < 5:
             _pool = _base_respaldo.loc[
                 _base_respaldo["Producto"].astype(str) == str(_prod)
             ].copy()
@@ -1353,58 +1438,194 @@ if unidad.startswith("Polimer") and all(
         if len(_pool) == 0:
             continue
 
-        _rend_pool = pd.to_numeric(_pool["Rendimiento"], errors="coerce").dropna()
+        _pool["Rendimiento"] = pd.to_numeric(_pool["Rendimiento"], errors="coerce")
+        _pool = _pool.dropna(subset=["Rendimiento"])
 
-        if len(_rend_pool) == 0:
+        if len(_pool) == 0:
             continue
 
+        _rend_pool = pd.to_numeric(_pool["Rendimiento"], errors="coerce").dropna()
         _n = len(_rend_pool)
 
-        # Rendimiento estimado: referencia alcanzable del mismo producto.
-        # Se usa el bloque superior del histórico confiable, no la mediana total,
-        # para evitar subestimar productos como KFM cuando hubo campañas antiguas
-        # con rendimiento claramente menor.
+        # Piso por producto: evita que la referencia caiga por campañas viejas
+        # de baja performance. Para productos con muchos datos usa P90; con pocos,
+        # usa percentil más alto.
         if _n >= 10:
-            _umbral = _rend_pool.quantile(0.90)
-            _vals_top = _rend_pool.loc[_rend_pool >= _umbral]
-            _estimado_val = float(_vals_top.mean())
+            _piso_producto = float(_rend_pool.quantile(0.90))
         elif _n >= 5:
-            _umbral = _rend_pool.quantile(0.75)
-            _vals_top = _rend_pool.loc[_rend_pool >= _umbral]
-            _estimado_val = float(_vals_top.mean())
+            _piso_producto = float(_rend_pool.quantile(0.80))
         else:
-            _estimado_val = float(_rend_pool.max())
+            _piso_producto = float(_rend_pool.max())
 
-        _maximo_val = float(_rend_pool.max())
+        _features = []
+        for _f in _features_candidatas:
+            if _f in df_agrup.columns and _f in _pool.columns:
+                _serie_pool = pd.to_numeric(_pool[_f], errors="coerce")
+                if _serie_pool.notna().sum() >= 3:
+                    _features.append(_f)
 
-        _pos_prod = df_agrup.index.get_indexer(_idx_prod)
+        # Si no hay suficientes features, usar directamente el piso por producto.
+        if len(_features) == 0:
+            _pos_prod = df_agrup.index.get_indexer(_idx_prod)
+            _estimado[_pos_prod] = _piso_producto
+            _conf[_pos_prod] = min(100.0, 35.0 + 8.0 * _n)
+            continue
 
-        _estimado[_pos_prod] = _estimado_val
-        _maximo[_pos_prod] = _maximo_val
+        _x_pool = _pool[_features].copy()
 
-        # Confiabilidad por cantidad de datos del mismo producto.
-        _conf_val = min(100.0, 35.0 + 8.0 * _n)
+        for _f in _features:
+            _x_pool[_f] = pd.to_numeric(_x_pool[_f], errors="coerce")
 
-        if _usa_respaldo:
-            _conf_val = min(_conf_val, 70.0)
+        _med = _x_pool.median(axis=0, skipna=True)
+        _q75 = _x_pool.quantile(0.75)
+        _q25 = _x_pool.quantile(0.25)
 
-        # Penaliza puntos fuera de presión normal, pero mantiene referencia visible.
-        _pres_ok_prod = _presion_ok.loc[_idx_prod].to_numpy()
-        _conf[_pos_prod] = np.where(_pres_ok_prod, _conf_val, _conf_val * 0.4)
+        _escala = (_q75 - _q25).replace(0, np.nan)
+        _escala = _escala.fillna(_x_pool.std(axis=0, skipna=True))
+        _escala = _escala.replace(0, 1.0).fillna(1.0)
 
-        # Marcar puntos que están cerca de la referencia estimada.
-        _pool_target = _pool.loc[pd.to_numeric(_pool["Rendimiento"], errors="coerce") >= _estimado_val * 0.995]
-        _idx_target = _pool_target.index.intersection(df_agrup.index)
-        _pos_target = df_agrup.index.get_indexer(_idx_target)
-        _target_flag[_pos_target] = 1.0
-        _dist_min[_pos_target] = 0.0
-        _conf[_pos_target] = 100.0
+        _x_pool = _x_pool.fillna(_med)
+
+        _x_train = _x_pool.to_numpy(dtype=float)
+        _y_train = pd.to_numeric(_pool["Rendimiento"], errors="coerce").to_numpy(dtype=float)
+        _idx_pool = _pool.index.to_numpy()
+
+        _ok_train = np.isfinite(_x_train).all(axis=1) & np.isfinite(_y_train)
+        _x_train = _x_train[_ok_train]
+        _y_train = _y_train[_ok_train]
+        _idx_pool = _idx_pool[_ok_train]
+
+        if len(_y_train) == 0:
+            continue
+
+        _pesos = []
+        for _f in _features:
+            if _f == "Conc_propano":
+                _pesos.append(3.2)
+            elif _f in ["MFI_polvo", "Slurry", "C_Donor", "Rel_TEA_CDonor", "Rel_TEA_CDonor_calc"]:
+                _pesos.append(2.8)
+            elif _f in ["Conc_H2", "Ratio_H2_propano", "XS"]:
+                _pesos.append(2.5)
+            elif _f in ["MFI_pellets", "TEA", "Caudal_catalizador_activo", "Fraccion_ZN389_activo"]:
+                _pesos.append(1.8)
+            elif _f in ["Nivel_R2301", "Presion_R2301", "Calor_reaccion_URA", "Temperatura_R2301"]:
+                _pesos.append(1.3)
+            else:
+                _pesos.append(1.0)
+
+        _pesos = np.array(_pesos, dtype=float)
+        _med_np = _med.to_numpy(dtype=float)
+        _escala_np = _escala.to_numpy(dtype=float)
+
+        _x_train_s = ((_x_train - _med_np) / _escala_np) * np.sqrt(_pesos)
+
+        _x_actual_df = df_agrup.loc[_idx_prod, _features].copy()
+
+        for _f in _features:
+            _x_actual_df[_f] = pd.to_numeric(_x_actual_df[_f], errors="coerce")
+
+        _x_actual_df = _x_actual_df.fillna(_med)
+        _x_actual = _x_actual_df.to_numpy(dtype=float)
+
+        _validos = np.isfinite(_x_actual).all(axis=1)
+        _idx_actuales = np.array(list(_idx_prod))[_validos]
+        _x_actual = _x_actual[_validos]
+
+        if len(_idx_actuales) == 0:
+            continue
+
+        _bloque = 500
+
+        for _i0 in range(0, len(_idx_actuales), _bloque):
+            _idx_chunk = _idx_actuales[_i0:_i0 + _bloque]
+            _x_chunk = _x_actual[_i0:_i0 + _bloque]
+
+            _x_chunk_s = ((_x_chunk - _med_np) / _escala_np) * np.sqrt(_pesos)
+
+            _dist = (
+                (_x_chunk_s[:, None, :] - _x_train_s[None, :, :]) ** 2
+            ).sum(axis=2)
+
+            # Evitar que un punto se estime a sí mismo cuando pertenece al pool.
+            for _j, _idx_val in enumerate(_idx_chunk):
+                _mismo_idx = np.where(_idx_pool == _idx_val)[0]
+                if len(_mismo_idx) > 0 and _dist.shape[1] > 1:
+                    _dist[_j, _mismo_idx] = np.inf
+
+            _k = min(max(6, len(_y_train) // 3), 12, len(_y_train))
+            _orden = np.argsort(_dist, axis=1)[:, :_k]
+            _dist_k = np.take_along_axis(_dist, _orden, axis=1)
+            _y_k = _y_train[_orden]
+
+            _estimados_chunk = []
+            _dist_min_chunk = []
+
+            for _fila in range(_y_k.shape[0]):
+                _valid_nn = np.isfinite(_dist_k[_fila]) & np.isfinite(_y_k[_fila])
+
+                if not np.any(_valid_nn):
+                    _estimados_chunk.append(_piso_producto)
+                    _dist_min_chunk.append(np.nan)
+                    continue
+
+                _dist_vec = _dist_k[_fila, _valid_nn]
+                _y_vec = _y_k[_fila, _valid_nn]
+
+                # Referencia local: bloque superior de vecinos similares.
+                if len(_y_vec) >= 6:
+                    _umbral_local = np.quantile(_y_vec, 0.60)
+                elif len(_y_vec) >= 3:
+                    _umbral_local = np.quantile(_y_vec, 0.50)
+                else:
+                    _umbral_local = np.max(_y_vec)
+
+                _sel = _y_vec >= _umbral_local
+                _w = 1.0 / (_dist_vec[_sel] + 0.10)
+
+                if np.sum(_w) <= 0 or not np.isfinite(np.sum(_w)):
+                    _ref_local = float(np.nanmean(_y_vec[_sel]))
+                else:
+                    _ref_local = float(np.sum(_w * _y_vec[_sel]) / np.sum(_w))
+
+                # Estimación final: condición comparable, pero no menor al
+                # piso alto del producto.
+                _estimados_chunk.append(max(_ref_local, _piso_producto))
+                _dist_min_chunk.append(float(np.nanmin(_dist_vec)))
+
+            _pos_chunk = df_agrup.index.get_indexer(_idx_chunk)
+            _estimado[_pos_chunk] = np.array(_estimados_chunk, dtype=float)
+            _dist_min[_pos_chunk] = np.array(_dist_min_chunk, dtype=float)
+
+            _conf_base = min(100.0, 35.0 + 8.0 * _n)
+
+            if _usa_respaldo:
+                _conf_base = min(_conf_base, 70.0)
+
+            _d = np.array(_dist_min_chunk, dtype=float)
+            _conf_dist = 100.0 * np.exp(-_d / max(len(_features), 1))
+            _conf_dist = np.where(np.isfinite(_conf_dist), _conf_dist, _conf_base)
+
+            _conf_final = np.minimum(_conf_base, _conf_dist + 20.0)
+
+            _pres_ok_chunk = _presion_ok.loc[_idx_chunk].to_numpy()
+            _conf_final = np.where(_pres_ok_chunk, _conf_final, _conf_final * 0.4)
+
+            _conf[_pos_chunk] = _conf_final
+
+        # Marcar puntos históricos del bloque superior del producto.
+        _pool_top = _pool.loc[
+            pd.to_numeric(_pool["Rendimiento"], errors="coerce") >= _piso_producto * 0.995
+        ]
+        _idx_top = _pool_top.index.intersection(df_agrup.index)
+        _pos_top = df_agrup.index.get_indexer(_idx_top)
+        _target_flag[_pos_top] = 1.0
 
     df_agrup["Productividad_estimada"] = pd.Series(_estimado, index=df_agrup.index)
     df_agrup["Rendimiento_esperado_producto"] = pd.Series(_estimado, index=df_agrup.index)
-    df_agrup["Target_operativo_producto"] = np.nan
-    df_agrup["Maximo_historico_validado_producto"] = pd.Series(_maximo, index=df_agrup.index)
 
+    # Variables internas mantenidas por compatibilidad.
+    df_agrup["Target_operativo_producto"] = np.nan
+    df_agrup["Maximo_historico_validado_producto"] = np.nan
     df_agrup["Distancia_benchmark_productividad"] = pd.Series(_dist_min, index=df_agrup.index)
     df_agrup["Confiabilidad_benchmark_productividad"] = pd.Series(_conf, index=df_agrup.index)
     df_agrup["Indicador_target_optimo_productividad"] = pd.Series(_target_flag, index=df_agrup.index)
@@ -1416,11 +1637,7 @@ if unidad.startswith("Polimer") and all(
     )
 
     df_agrup["Gap_vs_target_operativo"] = np.nan
-
-    df_agrup["Gap_vs_maximo_historico"] = (
-        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
-        - pd.to_numeric(df_agrup["Maximo_historico_validado_producto"], errors="coerce")
-    )
+    df_agrup["Gap_vs_maximo_historico"] = np.nan
 
     if "Presion_operacion_OK" in df_agrup.columns:
         df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
