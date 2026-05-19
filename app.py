@@ -403,6 +403,29 @@ def normalizar_texto(texto):
     return texto
 
 
+
+
+def normalizar_producto_operativo(producto):
+    """
+    Normaliza el producto para análisis de campañas.
+    Regla solicitada:
+    - Todos los productos KFM se agrupan como KFM, aunque tengan sufijos TE.
+    - El resto queda igual, salvo limpieza básica de espacios.
+    """
+    if producto is None or pd.isna(producto):
+        return pd.NA
+
+    p = str(producto).strip()
+    if p == "" or p.lower() in ["nan", "none", "<na>", "0", "0.0"]:
+        return pd.NA
+
+    # Agrupar KFM6110, KFM6110 TE-081, KFM6110 TE062, KFM6110-TE066, etc.
+    # Nombre operativo mostrado: KFM6110.
+    if "KFM" in p.upper():
+        return "KFM6110"
+
+    return p
+
 def buscar_columna_por_descripcion(descripciones_excel, descripcion_buscada):
     """
     Busca una columna por descripcion. Se usa como respaldo para variables calculadas
@@ -571,7 +594,7 @@ def cargar_datos(
             })
 
             # Asignar por posición para evitar problemas de índice.
-            df_out["Producto"] = producto.to_numpy()
+            df_out["Producto"] = producto.map(normalizar_producto_operativo).to_numpy()
 
             filas_mapeo.append({
                 "Variable app": "Producto",
@@ -1133,7 +1156,7 @@ if unidad.startswith("Polimer"):
             })
         )
 
-        df["Producto"] = serie_producto
+        df["Producto"] = serie_producto.map(normalizar_producto_operativo)
 
         productos_disponibles = sorted([
             str(p).strip()
@@ -1176,24 +1199,29 @@ if unidad.startswith("Polimer"):
 
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
-# AJUSTE FINAL POST-AGRUPACION REFERENCIAS DE RENDIMIENTO POR PRODUCTO
-# Referencias calculadas por PRODUCTO/CAMPAÑA, sin mezclar productos:
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR PRODUCTO
+# Referencia calculada por PRODUCTO/CAMPAÑA, sin mezclar productos.
 #
-# - Rendimiento estimado:
-#   mediana robusta del historico confiable del mismo producto.
+# Cambio aplicado:
+# - Todos los productos KFM se agrupan como "KFM", aunque tengan sufijos TE.
+# - El rendimiento estimado ya no es la mediana de todo el histórico,
+#   porque para KFM quedaba demasiado bajo respecto de campañas buenas recientes.
+# - Ahora se calcula como promedio robusto de los mejores puntos confiables
+#   del mismo producto:
+#     * Si hay >= 10 puntos: promedio del TOP 10%.
+#     * Si hay 5 a 9 puntos: promedio del TOP 25%.
+#     * Si hay < 5 puntos: máximo histórico confiable del mismo producto.
 #
-# - Target operativo por producto:
-#   percentil 90 del historico confiable del mismo producto.
-#   Representa un objetivo alto pero repetible, no un punto maximo aislado.
-#
-# - Maximo historico validado por producto:
-#   mejor valor historico dentro de datos confiables del mismo producto.
-#   Se muestra como referencia, pero no se usa como target principal.
+# Interpretación:
+# - Rendimiento real > Rendimiento estimado:
+#   campaña por encima de la referencia estimada.
+# - Rendimiento real < Rendimiento estimado:
+#   campaña por debajo de la referencia estimada.
 #
 # Base candidata:
 # - 28/04/2024-06/10/2024 + 01/05/2025-31/12/2025.
 # - Se excluye 01/11/2024-30/04/2025 por evento de baja productividad/bajo nivel.
-# - Se priorizan condiciones confiables de operacion:
+# - Se priorizan condiciones confiables de operación:
 #   30 < Presion_R2301 < 31
 #   60 < Nivel_R2301 < 70, si existe
 #   8000 < Calor_reaccion_URA < 13000, si existe
@@ -1245,6 +1273,7 @@ if unidad.startswith("Polimer") and all(
             "0": pd.NA,
             "0.0": pd.NA,
         })
+        .map(normalizar_producto_operativo)
     )
     df_agrup["Producto"] = _producto
 
@@ -1271,19 +1300,19 @@ if unidad.startswith("Polimer") and all(
 
     _base_confiable = df_agrup.loc[_calidad_base].copy()
 
-    # Respaldo: mismo producto en operacion normal y fuera del periodo excluido.
+    # Respaldo: mismo producto en operación normal y fuera del periodo excluido.
     # Se usa solo cuando el producto tiene muy pocos puntos en la base principal.
     _base_respaldo_mask = _presion_ok & _rendimiento.notna() & df_agrup["Producto"].notna() & (~_periodo_excluido)
-
     _base_respaldo = df_agrup.loc[_base_respaldo_mask].copy()
 
-    _esperado = np.full(len(df_agrup), np.nan)
-    _target = np.full(len(df_agrup), np.nan)
-    _maximo = np.full(len(df_agrup), np.nan)
+    _estimado = np.full(len(df_agrup), np.nan)
     _conf = np.full(len(df_agrup), np.nan)
-    _target_flag = np.zeros(len(df_agrup))
     _percentil_base = np.full(len(df_agrup), np.nan)
+
+    # Variables internas mantenidas por compatibilidad, pero no visibles.
+    _target_flag = np.zeros(len(df_agrup))
     _dist_min = np.full(len(df_agrup), np.nan)
+    _maximo = np.full(len(df_agrup), np.nan)
 
     if len(_base_confiable) > 0:
         _base_confiable["Percentil_rendimiento_base"] = (
@@ -1331,25 +1360,26 @@ if unidad.startswith("Polimer") and all(
 
         _n = len(_rend_pool)
 
-        # Rendimiento esperado: valor central robusto.
-        _esperado_val = float(_rend_pool.median())
-
-        # Target operativo: P90. Si hay pocos puntos, el P90 puede coincidir
-        # con valores cercanos al maximo, pero sigue siendo menos arbitrario
-        # que usar siempre el maximo como objetivo.
-        if _n >= 5:
-            _target_val = float(_rend_pool.quantile(0.90))
-        elif _n >= 3:
-            _target_val = float(_rend_pool.quantile(0.75))
+        # Rendimiento estimado: referencia alcanzable del mismo producto.
+        # Se usa el bloque superior del histórico confiable, no la mediana total,
+        # para evitar subestimar productos como KFM cuando hubo campañas antiguas
+        # con rendimiento claramente menor.
+        if _n >= 10:
+            _umbral = _rend_pool.quantile(0.90)
+            _vals_top = _rend_pool.loc[_rend_pool >= _umbral]
+            _estimado_val = float(_vals_top.mean())
+        elif _n >= 5:
+            _umbral = _rend_pool.quantile(0.75)
+            _vals_top = _rend_pool.loc[_rend_pool >= _umbral]
+            _estimado_val = float(_vals_top.mean())
         else:
-            _target_val = float(_rend_pool.max())
+            _estimado_val = float(_rend_pool.max())
 
         _maximo_val = float(_rend_pool.max())
 
         _pos_prod = df_agrup.index.get_indexer(_idx_prod)
 
-        _esperado[_pos_prod] = _esperado_val
-        _target[_pos_prod] = _target_val
+        _estimado[_pos_prod] = _estimado_val
         _maximo[_pos_prod] = _maximo_val
 
         # Confiabilidad por cantidad de datos del mismo producto.
@@ -1358,23 +1388,21 @@ if unidad.startswith("Polimer") and all(
         if _usa_respaldo:
             _conf_val = min(_conf_val, 70.0)
 
-        # Penaliza puntos fuera de presión normal, pero mantiene referencias visibles.
+        # Penaliza puntos fuera de presión normal, pero mantiene referencia visible.
         _pres_ok_prod = _presion_ok.loc[_idx_prod].to_numpy()
         _conf[_pos_prod] = np.where(_pres_ok_prod, _conf_val, _conf_val * 0.4)
 
-        # Marcar puntos que están cerca del target operativo del producto.
-        _pool_target = _pool.loc[pd.to_numeric(_pool["Rendimiento"], errors="coerce") >= _target_val * 0.995]
+        # Marcar puntos que están cerca de la referencia estimada.
+        _pool_target = _pool.loc[pd.to_numeric(_pool["Rendimiento"], errors="coerce") >= _estimado_val * 0.995]
         _idx_target = _pool_target.index.intersection(df_agrup.index)
         _pos_target = df_agrup.index.get_indexer(_idx_target)
         _target_flag[_pos_target] = 1.0
         _dist_min[_pos_target] = 0.0
         _conf[_pos_target] = 100.0
 
-    # Nombres historicos mantenidos:
-    # Productividad_estimada = Rendimiento estimado.
-    df_agrup["Productividad_estimada"] = pd.Series(_esperado, index=df_agrup.index)
-    df_agrup["Rendimiento_esperado_producto"] = pd.Series(_esperado, index=df_agrup.index)
-    df_agrup["Target_operativo_producto"] = pd.Series(_target, index=df_agrup.index)
+    df_agrup["Productividad_estimada"] = pd.Series(_estimado, index=df_agrup.index)
+    df_agrup["Rendimiento_esperado_producto"] = pd.Series(_estimado, index=df_agrup.index)
+    df_agrup["Target_operativo_producto"] = np.nan
     df_agrup["Maximo_historico_validado_producto"] = pd.Series(_maximo, index=df_agrup.index)
 
     df_agrup["Distancia_benchmark_productividad"] = pd.Series(_dist_min, index=df_agrup.index)
@@ -1387,10 +1415,7 @@ if unidad.startswith("Polimer") and all(
         - pd.to_numeric(df_agrup["Productividad_estimada"], errors="coerce")
     )
 
-    df_agrup["Gap_vs_target_operativo"] = (
-        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
-        - pd.to_numeric(df_agrup["Target_operativo_producto"], errors="coerce")
-    )
+    df_agrup["Gap_vs_target_operativo"] = np.nan
 
     df_agrup["Gap_vs_maximo_historico"] = (
         pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
