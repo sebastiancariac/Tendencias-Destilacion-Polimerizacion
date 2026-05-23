@@ -408,9 +408,18 @@ def normalizar_texto(texto):
 def normalizar_producto_operativo(producto):
     """
     Normaliza el producto para análisis de campañas.
-    Regla solicitada:
-    - Todos los productos KFM se agrupan como KFM6110, aunque tengan sufijos TE.
-    - El resto queda igual, salvo limpieza básica de espacios.
+
+    Reglas:
+    - Todos los KFM se agrupan como KFM6110.
+    - Los sufijos TE de transición no se discriminan.
+      Ejemplos:
+        RFD6140K TE063  -> RFD6140K
+        KED6270 TE-079  -> KED6270
+        KYD 6110 TE-088 -> KYD6110
+    - También se corrigen espacios internos del grado:
+        HYS 6200 -> HYS6200
+    - Si hay texto adicional entre paréntesis o sufijos de ensayo, se toma
+      el primer código de grado detectado.
     """
     if producto is None or pd.isna(producto):
         return pd.NA
@@ -419,12 +428,75 @@ def normalizar_producto_operativo(producto):
     if p == "" or p.lower() in ["nan", "none", "<na>", "0", "0.0"]:
         return pd.NA
 
-    # Agrupar KFM6110, KFM6110 TE-081, KFM6110 TE062, KFM6110-TE066, etc.
-    # Nombre operativo mostrado: KFM6110.
-    if "KFM" in p.upper():
+    p_upper = p.upper().strip()
+
+    # Regla específica solicitada: KFM se muestra como KFM6110.
+    if "KFM" in p_upper:
         return "KFM6110"
 
-    return p
+    # Buscar el primer código de grado: letras + 4 dígitos + sufijo opcional.
+    # Funciona para RFD6140K, KED6270, HYS 6200, KYD 6110, XMD6279T, etc.
+    m = re.search(r"([A-Z]{2,4})\s*[- ]?\s*(\d{4})([A-Z]?)", p_upper)
+    if m:
+        return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+
+    # Fallback: eliminar sufijos TE si no se detectó código estructurado.
+    p_upper = re.sub(r"\s*[-]?\s*TE\s*[-]?\s*\d+.*$", "", p_upper).strip()
+    p_upper = re.sub(r"\s+", "", p_upper)
+
+    return p_upper
+
+
+def agregar_marcas_producto_a_figura(fig, df_plot, en_subplots=False, max_marcas=35):
+    """
+    Agrega marcas verticales con el producto/campaña en la gráfica.
+    Limita la cantidad para evitar saturar la visualización.
+    """
+    if "Producto" not in df_plot.columns or "Fecha_y_hora" not in df_plot.columns:
+        return fig
+
+    datos_producto = df_plot[["Fecha_y_hora", "Producto"]].copy()
+    datos_producto["Producto"] = datos_producto["Producto"].map(normalizar_producto_operativo)
+    datos_producto = datos_producto.dropna(subset=["Fecha_y_hora", "Producto"])
+
+    if len(datos_producto) == 0:
+        return fig
+
+    datos_producto = datos_producto.sort_values("Fecha_y_hora")
+    cambios = datos_producto.loc[
+        datos_producto["Producto"].astype(str).ne(datos_producto["Producto"].astype(str).shift())
+    ].copy()
+
+    if len(cambios) == 0:
+        return fig
+
+    if len(cambios) > max_marcas:
+        cambios = cambios.iloc[:max_marcas].copy()
+
+    for _, fila in cambios.iterrows():
+        try:
+            kwargs = dict(
+                x=fila["Fecha_y_hora"],
+                line_width=1,
+                line_dash="dot",
+                opacity=0.45,
+                annotation_text=str(fila["Producto"]),
+                annotation_position="top",
+                annotation_font_size=10,
+            )
+
+            if en_subplots:
+                fig.add_vline(row="all", col=1, **kwargs)
+            else:
+                fig.add_vline(**kwargs)
+
+        except Exception:
+            # Las marcas de producto son auxiliares; si Plotly no permite agregar
+            # alguna anotación específica, no debe romper la app.
+            pass
+
+    return fig
+
 
 def buscar_columna_por_descripcion(descripciones_excel, descripcion_buscada):
     """
@@ -1160,7 +1232,7 @@ if unidad.startswith("Polimer"):
 
         productos_disponibles = sorted([
             str(p).strip()
-            for p in serie_producto.dropna().unique()
+            for p in df["Producto"].dropna().unique()
             if str(p).strip()
         ])
 
@@ -1930,13 +2002,37 @@ with tab1:
                     elif v == "Productividad_estimada":
                         nombre_traza = "Rendimiento estimado"
 
-                fig.add_trace(go.Scatter(
-                    x=df_f["Fecha_y_hora"],
-                    y=df_f[v],
-                    name=nombre_traza,
-                    mode="lines+markers",
-                    connectgaps=False,
-                ))
+                if unidad.startswith("Polimer") and "Producto" in df_f.columns:
+                    producto_hover = (
+                        df_f["Producto"]
+                        .map(normalizar_producto_operativo)
+                        .astype("string")
+                        .fillna("")
+                    )
+
+                    fig.add_trace(go.Scatter(
+                        x=df_f["Fecha_y_hora"],
+                        y=df_f[v],
+                        name=nombre_traza,
+                        mode="lines+markers",
+                        connectgaps=False,
+                        customdata=producto_hover,
+                        hovertemplate=(
+                            "%{fullData.name}<br>"
+                            "Fecha: %{x}<br>"
+                            "Valor: %{y}<br>"
+                            "Producto: %{customdata}"
+                            "<extra></extra>"
+                        ),
+                    ))
+                else:
+                    fig.add_trace(go.Scatter(
+                        x=df_f["Fecha_y_hora"],
+                        y=df_f[v],
+                        name=nombre_traza,
+                        mode="lines+markers",
+                        connectgaps=False,
+                    ))
 
             fig.update_layout(
                 height=650,
@@ -1950,6 +2046,10 @@ with tab1:
                     yanchor="top",
                 ),
             )
+
+            if unidad.startswith("Polimer") and "Producto" in df_f.columns:
+                fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=False)
+                st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
 
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -1986,6 +2086,11 @@ with tab1:
                 hovermode="x unified",
             )
             fig.update_xaxes(showticklabels=True)
+
+            if unidad.startswith("Polimer") and "Producto" in df_f.columns:
+                fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=True)
+                st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
+
             st.plotly_chart(fig, use_container_width=True)
 
 
