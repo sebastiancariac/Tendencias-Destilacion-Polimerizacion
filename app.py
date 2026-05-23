@@ -1111,9 +1111,20 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Variables a graficar")
 
 key_vars_grafico = f"variables_grafico_{unidad}"
+key_quitar_grafico = f"quitar_grafico_pendiente_{unidad}"
 
 if key_vars_grafico not in st.session_state:
     st.session_state[key_vars_grafico] = [v for v in default_vars if v in todas_variables]
+
+# Si el usuario tocó "✕" en la corrida anterior, se quita acá,
+# antes de crear el widget multiselect. Streamlit no permite modificar
+# st.session_state[key_vars_grafico] después de instanciar el widget.
+if key_quitar_grafico in st.session_state:
+    _var_a_quitar = st.session_state.pop(key_quitar_grafico)
+    st.session_state[key_vars_grafico] = [
+        v for v in st.session_state[key_vars_grafico]
+        if v != _var_a_quitar
+    ]
 
 # Evita que queden variables de otra unidad o auxiliares ya ocultas.
 st.session_state[key_vars_grafico] = [
@@ -1138,10 +1149,7 @@ if variables_sel:
                 st.markdown(f"**{nombres_legibles[_var_sel]}**")
             with col_quitar:
                 if st.button("✕", key=f"quitar_grafico_{unidad}_{_var_sel}", help="Quitar variable"):
-                    st.session_state[key_vars_grafico] = [
-                        v for v in st.session_state[key_vars_grafico]
-                        if v != _var_sel
-                    ]
+                    st.session_state[key_quitar_grafico] = _var_sel
                     st.rerun()
 
 
