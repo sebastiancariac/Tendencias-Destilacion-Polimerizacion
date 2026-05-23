@@ -2198,7 +2198,7 @@ with tab1:
                     )
 
                     if usar_y2_efectivo:
-                        fig.add_trace(traza, secondary_y=(v in variables_eje_y2))
+                        fig.add_trace(traza, secondary_y=(v in variables_y2))
                     else:
                         fig.add_trace(traza)
                 else:
@@ -2211,7 +2211,7 @@ with tab1:
                     )
 
                     if usar_y2_efectivo:
-                        fig.add_trace(traza, secondary_y=(v in variables_eje_y2))
+                        fig.add_trace(traza, secondary_y=(v in variables_y2))
                     else:
                         fig.add_trace(traza)
 
