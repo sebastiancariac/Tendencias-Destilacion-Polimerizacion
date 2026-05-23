@@ -1157,6 +1157,40 @@ if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimie
         help="Grafica solo Rendimiento real y Rendimiento estimado, sin modificar la seleccion general de variables.",
     )
 
+# Segundo eje Y para gráficos combinados.
+# Útil cuando las variables tienen escalas muy diferentes.
+usar_eje_y2_combinado = False
+variables_eje_y2 = []
+
+if modo_grafico == "Combinados" or grafico_rendimiento_target:
+    opciones_eje_y2 = ["Rendimiento", "Productividad_estimada"] if grafico_rendimiento_target else list(variables_sel)
+    opciones_eje_y2 = [v for v in opciones_eje_y2 if v in todas_variables]
+
+    if len(opciones_eje_y2) >= 2:
+        usar_eje_y2_combinado = st.sidebar.checkbox(
+            "Usar segundo eje Y en gráfico combinado",
+            value=False,
+            help=(
+                "Permite graficar algunas variables contra el eje izquierdo "
+                "y otras contra el eje derecho para mejorar la escala visual."
+            ),
+        )
+
+        if usar_eje_y2_combinado:
+            variables_eje_y2 = st.sidebar.multiselect(
+                "Variables en eje derecho:",
+                options=opciones_eje_y2,
+                default=opciones_eje_y2[1:],
+                format_func=lambda x: nombres_legibles[x],
+                key=f"variables_eje_y2_{unidad}",
+            )
+
+            if variables_eje_y2:
+                st.sidebar.caption(
+                    "Eje derecho: "
+                    + ", ".join([nombres_legibles[v] for v in variables_eje_y2])
+                )
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("Agrupacion temporal")
 agrupacion = st.sidebar.selectbox(
@@ -2030,7 +2064,13 @@ with tab1:
             st.caption("Vista rapida: Rendimiento real vs rendimiento estimado por producto. Esta opcion no cambia la seleccion general de variables.")
 
         if modo_grafico_efectivo == "Combinados":
-            fig = go.Figure()
+            usar_y2_efectivo = usar_eje_y2_combinado and len(variables_eje_y2) > 0
+
+            if usar_y2_efectivo:
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+            else:
+                fig = go.Figure()
+
             for v in variables_grafico:
                 nombre_traza = nombres_legibles[v]
 
@@ -2062,7 +2102,7 @@ with tab1:
                         x_plot = df_f["Fecha_y_hora"]
                         y_plot = df_f[v]
 
-                    fig.add_trace(go.Scatter(
+                    traza = go.Scatter(
                         x=x_plot,
                         y=y_plot,
                         name=nombre_traza,
@@ -2076,15 +2116,25 @@ with tab1:
                             "Producto: %{customdata}"
                             "<extra></extra>"
                         ),
-                    ))
+                    )
+
+                    if usar_y2_efectivo:
+                        fig.add_trace(traza, secondary_y=(v in variables_eje_y2))
+                    else:
+                        fig.add_trace(traza)
                 else:
-                    fig.add_trace(go.Scatter(
+                    traza = go.Scatter(
                         x=df_f["Fecha_y_hora"],
                         y=df_f[v],
                         name=nombre_traza,
                         mode=modo_traza,
                         connectgaps=False,
-                    ))
+                    )
+
+                    if usar_y2_efectivo:
+                        fig.add_trace(traza, secondary_y=(v in variables_eje_y2))
+                    else:
+                        fig.add_trace(traza)
 
             fig.update_layout(
                 height=650,
@@ -2098,6 +2148,24 @@ with tab1:
                     yanchor="top",
                 ),
             )
+
+            if usar_y2_efectivo:
+                variables_y2 = [v for v in variables_grafico if v in variables_eje_y2]
+                variables_y1 = [v for v in variables_grafico if v not in variables_eje_y2]
+
+                titulo_y1 = " / ".join([nombres_legibles[v] for v in variables_y1[:2]]) if variables_y1 else "Eje izquierdo"
+                titulo_y2 = " / ".join([nombres_legibles[v] for v in variables_y2[:2]]) if variables_y2 else "Eje derecho"
+
+                fig.update_yaxes(title_text=titulo_y1, secondary_y=False)
+                fig.update_yaxes(title_text=titulo_y2, secondary_y=True)
+
+                st.caption(
+                    "Gráfico combinado con dos ejes Y: eje izquierdo para "
+                    + (", ".join([nombres_legibles[v] for v in variables_y1]) if variables_y1 else "sin variables")
+                    + "; eje derecho para "
+                    + (", ".join([nombres_legibles[v] for v in variables_y2]) if variables_y2 else "sin variables")
+                    + "."
+                )
 
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
                 if filtro_producto_activo:
