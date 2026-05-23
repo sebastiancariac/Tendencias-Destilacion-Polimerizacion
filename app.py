@@ -1157,13 +1157,9 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Modo de grafico")
 modo_grafico = st.sidebar.radio("Modo:", options=["Separados", "Combinados"], index=0)
 
+# Se elimina la opción rápida "Rendimiento real vs estimado".
+# Con el modo Combinados + selección de variables + eje Y secundario, ya no hace falta.
 grafico_rendimiento_target = False
-if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimiento", "Productividad_estimada"]):
-    grafico_rendimiento_target = st.sidebar.checkbox(
-        "Grafico combinado: Rendimiento real vs estimado",
-        value=False,
-        help="Grafica solo Rendimiento real y Rendimiento estimado, sin modificar la seleccion general de variables.",
-    )
 
 # Configuración del eje Y secundario desde el sidebar izquierdo.
 # No se usa panel lateral derecho para no achicar la gráfica.
@@ -1171,10 +1167,9 @@ escala_y1_manual = None
 escala_y2_manual = None
 variables_y2_sidebar = []
 
-variables_para_ejes = ["Rendimiento", "Productividad_estimada"] if grafico_rendimiento_target else list(variables_sel)
-variables_para_ejes = [v for v in variables_para_ejes if v in todas_variables]
+variables_para_ejes = [v for v in list(variables_sel) if v in todas_variables]
 
-if (modo_grafico == "Combinados" or grafico_rendimiento_target) and len(variables_para_ejes) >= 2:
+if modo_grafico == "Combinados" and len(variables_para_ejes) >= 2:
     st.sidebar.markdown("---")
     st.sidebar.subheader("Eje Y secundario")
     variables_y2_sidebar = st.sidebar.multiselect(
@@ -1192,13 +1187,16 @@ if (modo_grafico == "Combinados" or grafico_rendimiento_target) and len(variable
         st.sidebar.caption("Se dejó al menos una variable en el eje izquierdo.")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Escalas gráfico combinado")
+st.sidebar.subheader("Escalas Y")
 
 usar_escalas_manual = st.sidebar.checkbox(
-    "Ajustar escalas manualmente",
+    "Ajustar escalas Y",
     value=False,
-    help="Permite fijar mínimos y máximos de los ejes Y. El rango disponible se amplía respecto al rango automático.",
+    help="Permite mover el rango visible de los ejes Y. El rango disponible queda ampliado respecto al automático.",
 )
+
+if usar_escalas_manual:
+    st.sidebar.caption("Usá las barras de rango Y izquierdo/derecho que aparecen abajo.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Agrupacion temporal")
@@ -2123,7 +2121,7 @@ with tab1:
                         axis=0,
                     )
 
-                    rango_y1 = _rango_ampliado(datos_y1, factor=2.5)
+                    rango_y1 = _rango_ampliado(datos_y1, factor=5.0)
 
                     if rango_y1 is not None:
                         y1_min_total, y1_max_total, y1_min_auto, y1_max_auto, y1_step = rango_y1
@@ -2152,7 +2150,7 @@ with tab1:
                         axis=0,
                     )
 
-                    rango_y2 = _rango_ampliado(datos_y2, factor=2.5)
+                    rango_y2 = _rango_ampliado(datos_y2, factor=5.0)
 
                     if rango_y2 is not None:
                         y2_min_total, y2_max_total, y2_min_auto, y2_max_auto, y2_step = rango_y2
@@ -2252,19 +2250,6 @@ with tab1:
                 ),
             )
 
-            # Barra horizontal nativa de Plotly para el eje X.
-            fig.update_xaxes(
-                rangeslider=dict(visible=True, thickness=0.08),
-                rangeselector=dict(
-                    buttons=list([
-                        dict(count=7, label="7d", step="day", stepmode="backward"),
-                        dict(count=1, label="1m", step="month", stepmode="backward"),
-                        dict(count=3, label="3m", step="month", stepmode="backward"),
-                        dict(step="all", label="Todo"),
-                    ])
-                ),
-            )
-
             if usar_y2_efectivo:
                 titulo_y1 = " / ".join([nombres_legibles[v] for v in variables_y1[:2]]) if variables_y1 else "Eje izquierdo"
                 titulo_y2 = " / ".join([nombres_legibles[v] for v in variables_y2[:2]]) if variables_y2 else "Eje derecho"
@@ -2293,8 +2278,8 @@ with tab1:
                     st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
 
             st.caption(
-                "En modo combinado, el eje X tiene barra inferior de zoom/rango. "
-                "Las variables del eje derecho se eligen desde el panel izquierdo."
+                "En modo combinado, las variables del eje derecho se eligen desde el panel izquierdo. "
+                "Para ajustar el rango Y, activá 'Ajustar escalas manualmente' en la barra lateral."
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
