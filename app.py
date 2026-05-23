@@ -447,6 +447,44 @@ def normalizar_producto_operativo(producto):
     return p_upper
 
 
+
+def preparar_serie_producto_filtrado_para_grafico(df_plot, y_col, agrupacion):
+    """
+    Para gráficos con filtro por producto/grado activo:
+    - Une puntos consecutivos.
+    - Corta la línea cuando hay saltos grandes de tiempo entre campañas.
+    - Mantiene todos los puntos visibles.
+
+    Regla de continuidad:
+    - hora: gap máximo 1.5 h
+    - dia: gap máximo 1.5 días
+    - semana: gap máximo 10 días
+    - mes: gap máximo 45 días
+    """
+    df_linea = df_plot[["Fecha_y_hora", y_col]].copy()
+    df_linea = df_linea.sort_values("Fecha_y_hora").reset_index(drop=True)
+
+    if agrupacion == "hora":
+        max_gap = pd.Timedelta(hours=1.5)
+    elif agrupacion == "dia":
+        max_gap = pd.Timedelta(days=1.5)
+    elif agrupacion == "semana":
+        max_gap = pd.Timedelta(days=10)
+    elif agrupacion == "mes":
+        max_gap = pd.Timedelta(days=45)
+    else:
+        max_gap = pd.Timedelta(days=1.5)
+
+    fechas = pd.to_datetime(df_linea["Fecha_y_hora"], errors="coerce")
+    gaps = fechas.diff() > max_gap
+
+    # Insertar NaN en y después de un salto para que Plotly corte la línea.
+    y = pd.to_numeric(df_linea[y_col], errors="coerce").copy()
+    y.loc[gaps] = np.nan
+
+    return df_linea["Fecha_y_hora"], y
+
+
 def agregar_marcas_producto_a_figura(fig, df_plot, en_subplots=False, max_marcas=35):
     """
     Agrega marcas verticales con el producto/campaña en la gráfica.
@@ -2004,7 +2042,7 @@ with tab1:
                     elif v == "Productividad_estimada":
                         nombre_traza = "Rendimiento estimado"
 
-                modo_traza = "markers" if filtro_producto_activo else "lines+markers"
+                modo_traza = "lines+markers"
 
                 if unidad.startswith("Polimer") and "Producto" in df_f.columns:
                     producto_hover = (
@@ -2014,9 +2052,19 @@ with tab1:
                         .fillna("")
                     )
 
+                    if filtro_producto_activo:
+                        x_plot, y_plot = preparar_serie_producto_filtrado_para_grafico(
+                            df_f,
+                            v,
+                            agrupacion,
+                        )
+                    else:
+                        x_plot = df_f["Fecha_y_hora"]
+                        y_plot = df_f[v]
+
                     fig.add_trace(go.Scatter(
-                        x=df_f["Fecha_y_hora"],
-                        y=df_f[v],
+                        x=x_plot,
+                        y=y_plot,
                         name=nombre_traza,
                         mode=modo_traza,
                         connectgaps=False,
@@ -2054,8 +2102,8 @@ with tab1:
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
                 if filtro_producto_activo:
                     st.caption(
-                        "Filtro por producto activo: la gráfica se muestra con puntos sin unir, "
-                        "para que cada punto represente solo momentos donde se produjo el grado seleccionado."
+                        "Filtro por producto activo: se unen solo puntos consecutivos "
+                        "y se corta la línea cuando hay saltos entre campañas."
                     )
                 else:
                     fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=False)
@@ -2076,7 +2124,7 @@ with tab1:
                 vertical_spacing=spacing,
             )
 
-            modo_traza = "markers" if filtro_producto_activo else "lines+markers"
+            modo_traza = "lines+markers"
 
             for i, v in enumerate(variables_grafico, 1):
                 if unidad.startswith("Polimer") and "Producto" in df_f.columns:
@@ -2087,10 +2135,20 @@ with tab1:
                         .fillna("")
                     )
 
+                    if filtro_producto_activo:
+                        x_plot, y_plot = preparar_serie_producto_filtrado_para_grafico(
+                            df_f,
+                            v,
+                            agrupacion,
+                        )
+                    else:
+                        x_plot = df_f["Fecha_y_hora"]
+                        y_plot = df_f[v]
+
                     fig.add_trace(
                         go.Scatter(
-                            x=df_f["Fecha_y_hora"],
-                            y=df_f[v],
+                            x=x_plot,
+                            y=y_plot,
                             mode=modo_traza,
                             connectgaps=False,
                             name=nombres_legibles[v],
@@ -2131,8 +2189,8 @@ with tab1:
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
                 if filtro_producto_activo:
                     st.caption(
-                        "Filtro por producto activo: la gráfica se muestra con puntos sin unir, "
-                        "para que cada punto represente solo momentos donde se produjo el grado seleccionado."
+                        "Filtro por producto activo: se unen solo puntos consecutivos "
+                        "y se corta la línea cuando hay saltos entre campañas."
                     )
                 else:
                     fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=True)
