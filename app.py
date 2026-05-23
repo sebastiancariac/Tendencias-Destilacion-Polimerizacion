@@ -1269,6 +1269,8 @@ if unidad.startswith("Polimer"):
 # AGRUPACION Y FILTROS
 # ==============================================================================
 
+filtro_producto_activo = unidad.startswith("Polimer") and len(productos_sel) > 0
+
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
 # AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR PRODUCTO Y CONDICION OPERATIVA
@@ -2002,6 +2004,8 @@ with tab1:
                     elif v == "Productividad_estimada":
                         nombre_traza = "Rendimiento estimado"
 
+                modo_traza = "markers" if filtro_producto_activo else "lines+markers"
+
                 if unidad.startswith("Polimer") and "Producto" in df_f.columns:
                     producto_hover = (
                         df_f["Producto"]
@@ -2014,7 +2018,7 @@ with tab1:
                         x=df_f["Fecha_y_hora"],
                         y=df_f[v],
                         name=nombre_traza,
-                        mode="lines+markers",
+                        mode=modo_traza,
                         connectgaps=False,
                         customdata=producto_hover,
                         hovertemplate=(
@@ -2030,7 +2034,7 @@ with tab1:
                         x=df_f["Fecha_y_hora"],
                         y=df_f[v],
                         name=nombre_traza,
-                        mode="lines+markers",
+                        mode=modo_traza,
                         connectgaps=False,
                     ))
 
@@ -2048,8 +2052,14 @@ with tab1:
             )
 
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
-                fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=False)
-                st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
+                if filtro_producto_activo:
+                    st.caption(
+                        "Filtro por producto activo: la gráfica se muestra con puntos sin unir, "
+                        "para que cada punto represente solo momentos donde se produjo el grado seleccionado."
+                    )
+                else:
+                    fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=False)
+                    st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
 
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -2066,19 +2076,50 @@ with tab1:
                 vertical_spacing=spacing,
             )
 
+            modo_traza = "markers" if filtro_producto_activo else "lines+markers"
+
             for i, v in enumerate(variables_grafico, 1):
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_f["Fecha_y_hora"],
-                        y=df_f[v],
-                        mode="lines+markers",
-                        connectgaps=False,
-                        name=nombres_legibles[v],
-                        showlegend=False,
-                    ),
-                    row=i,
-                    col=1,
-                )
+                if unidad.startswith("Polimer") and "Producto" in df_f.columns:
+                    producto_hover = (
+                        df_f["Producto"]
+                        .map(normalizar_producto_operativo)
+                        .astype("string")
+                        .fillna("")
+                    )
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df_f["Fecha_y_hora"],
+                            y=df_f[v],
+                            mode=modo_traza,
+                            connectgaps=False,
+                            name=nombres_legibles[v],
+                            showlegend=False,
+                            customdata=producto_hover,
+                            hovertemplate=(
+                                "%{fullData.name}<br>"
+                                "Fecha: %{x}<br>"
+                                "Valor: %{y}<br>"
+                                "Producto: %{customdata}"
+                                "<extra></extra>"
+                            ),
+                        ),
+                        row=i,
+                        col=1,
+                    )
+                else:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df_f["Fecha_y_hora"],
+                            y=df_f[v],
+                            mode=modo_traza,
+                            connectgaps=False,
+                            name=nombres_legibles[v],
+                            showlegend=False,
+                        ),
+                        row=i,
+                        col=1,
+                    )
 
             fig.update_layout(
                 height=altura_total,
@@ -2088,8 +2129,14 @@ with tab1:
             fig.update_xaxes(showticklabels=True)
 
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
-                fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=True)
-                st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
+                if filtro_producto_activo:
+                    st.caption(
+                        "Filtro por producto activo: la gráfica se muestra con puntos sin unir, "
+                        "para que cada punto represente solo momentos donde se produjo el grado seleccionado."
+                    )
+                else:
+                    fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=True)
+                    st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
 
             st.plotly_chart(fig, use_container_width=True)
 
@@ -2310,10 +2357,27 @@ with tab3:
 with tab4:
     st.subheader("Datos filtrados")
 
-    columnas_mostrar = ["Fecha_y_hora"] + variables_sel if variables_sel else ["Fecha_y_hora"] + todas_variables
-    st.dataframe(df_f[columnas_mostrar], use_container_width=True)
+    if variables_sel:
+        columnas_mostrar = ["Fecha_y_hora"] + variables_sel
+    else:
+        columnas_mostrar = ["Fecha_y_hora"] + todas_variables
 
-    csv = df_f[columnas_mostrar].to_csv(index=False).encode("utf-8-sig")
+    # En Polimerización, agregar siempre el producto/grado en la tabla,
+    # aunque no esté seleccionado como variable numérica.
+    if unidad.startswith("Polimer") and "Producto" in df_f.columns:
+        if "Producto" not in columnas_mostrar:
+            columnas_mostrar.insert(1, "Producto")
+
+    columnas_mostrar = [c for c in columnas_mostrar if c in df_f.columns]
+
+    df_tabla = df_f[columnas_mostrar].copy()
+
+    if unidad.startswith("Polimer") and "Producto" in df_tabla.columns:
+        df_tabla["Producto"] = df_tabla["Producto"].map(normalizar_producto_operativo)
+
+    st.dataframe(df_tabla, use_container_width=True)
+
+    csv = df_tabla.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         label="Descargar datos filtrados en CSV",
         data=csv,
