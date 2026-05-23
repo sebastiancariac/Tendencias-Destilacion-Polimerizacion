@@ -1165,12 +1165,40 @@ if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimie
         help="Grafica solo Rendimiento real y Rendimiento estimado, sin modificar la seleccion general de variables.",
     )
 
-# En modo Combinados el segundo eje Y se activa automáticamente
-# cuando hay dos o más variables:
-# - primera variable: eje izquierdo
-# - segunda y siguientes: eje derecho
+# Configuración del eje Y secundario desde el sidebar izquierdo.
+# No se usa panel lateral derecho para no achicar la gráfica.
 escala_y1_manual = None
 escala_y2_manual = None
+variables_y2_sidebar = []
+
+variables_para_ejes = ["Rendimiento", "Productividad_estimada"] if grafico_rendimiento_target else list(variables_sel)
+variables_para_ejes = [v for v in variables_para_ejes if v in todas_variables]
+
+if (modo_grafico == "Combinados" or grafico_rendimiento_target) and len(variables_para_ejes) >= 2:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Eje Y secundario")
+    variables_y2_sidebar = st.sidebar.multiselect(
+        "Variables en eje derecho:",
+        options=variables_para_ejes,
+        default=variables_para_ejes[1:],
+        format_func=lambda x: nombres_legibles[x],
+        key=f"variables_y2_sidebar_{unidad}",
+        help="Las variables no seleccionadas quedan en el eje izquierdo.",
+    )
+
+    # Evitar que todas las variables queden en el eje derecho.
+    if len(variables_y2_sidebar) == len(variables_para_ejes):
+        variables_y2_sidebar = variables_y2_sidebar[1:]
+        st.sidebar.caption("Se dejó al menos una variable en el eje izquierdo.")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Escalas gráfico combinado")
+
+usar_escalas_manual = st.sidebar.checkbox(
+    "Ajustar escalas manualmente",
+    value=False,
+    help="Permite fijar mínimos y máximos de los ejes Y. El rango disponible se amplía respecto al rango automático.",
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Agrupacion temporal")
@@ -2046,83 +2074,45 @@ with tab1:
 
         if modo_grafico_efectivo == "Combinados":
             usar_y2_efectivo = len(variables_grafico) >= 2
+            variables_y2 = [v for v in variables_y2_sidebar if v in variables_grafico] if usar_y2_efectivo else []
+            variables_y1 = [v for v in variables_grafico if v not in variables_y2] if usar_y2_efectivo else list(variables_grafico)
 
-            # Variables por eje:
-            # - Si hay una sola variable, se usa solo eje izquierdo.
-            # - Si hay dos o más, el usuario puede elegir cuáles van al eje derecho.
-            variables_y2 = []
-            variables_y1 = list(variables_grafico)
+            # Si por algún motivo el eje izquierdo queda vacío, forzar la primera variable allí.
+            if usar_y2_efectivo and not variables_y1 and variables_grafico:
+                variables_y1 = [variables_grafico[0]]
+                variables_y2 = [v for v in variables_y2 if v != variables_grafico[0]]
 
-            col_grafico, col_escalas = st.columns([5.2, 1.45])
+            def _rango_ampliado(series, factor=2.0):
+                datos = pd.to_numeric(series, errors="coerce").dropna()
+                if len(datos) == 0:
+                    return None
 
-            with col_escalas:
-                st.markdown("**Ejes Y**")
+                y_min = float(datos.min())
+                y_max = float(datos.max())
 
-                if usar_y2_efectivo:
-                    variables_y2 = st.multiselect(
-                        "Eje derecho",
-                        options=variables_grafico,
-                        default=variables_grafico[1:],
-                        format_func=lambda x: nombres_legibles[x],
-                        key=f"variables_y2_comb_{unidad}_{agrupacion}",
-                        help=(
-                            "Elegí qué variables se grafican contra el eje derecho. "
-                            "Las variables no seleccionadas quedan en el eje izquierdo."
-                        ),
-                    )
+                if not np.isfinite(y_min) or not np.isfinite(y_max):
+                    return None
 
-                    variables_y1 = [v for v in variables_grafico if v not in variables_y2]
-
-                    # Evitar que todas las variables queden en el eje derecho.
-                    if not variables_y1 and variables_grafico:
-                        variables_y1 = [variables_grafico[0]]
-                        variables_y2 = [v for v in variables_y2 if v != variables_grafico[0]]
-                        st.warning("Debe quedar al menos una variable en el eje izquierdo.")
-
-                    st.caption(
-                        "Izquierdo: "
-                        + (", ".join([nombres_legibles[v] for v in variables_y1]) if variables_y1 else "-")
-                    )
-                    st.caption(
-                        "Derecho: "
-                        + (", ".join([nombres_legibles[v] for v in variables_y2]) if variables_y2 else "-")
-                    )
+                if y_min == y_max:
+                    delta = max(abs(y_min) * 0.50, 5.0)
                 else:
-                    st.caption("Una sola variable: se usa solo eje izquierdo.")
+                    delta = (y_max - y_min)
 
-                def _rango_con_margen(series):
-                    datos = pd.to_numeric(series, errors="coerce").dropna()
+                # Rango ampliado para que el usuario pueda abrir bastante la escala.
+                min_total = y_min - factor * delta
+                max_total = y_max + factor * delta
 
-                    if len(datos) == 0:
-                        return None
+                if min_total == max_total:
+                    max_total = min_total + 1.0
 
-                    y_min = float(datos.min())
-                    y_max = float(datos.max())
+                step = max((max_total - min_total) / 500.0, 0.0001)
 
-                    if not np.isfinite(y_min) or not np.isfinite(y_max):
-                        return None
+                return min_total, max_total, y_min, y_max, step
 
-                    if y_min == y_max:
-                        margen = max(abs(y_min) * 0.10, 1.0)
-                    else:
-                        margen = (y_max - y_min) * 0.10
+            escala_y1_manual = None
+            escala_y2_manual = None
 
-                    min_total = y_min - margen
-                    max_total = y_max + margen
-
-                    if min_total == max_total:
-                        max_total = min_total + 1.0
-
-                    step = max((max_total - min_total) / 200.0, 0.0001)
-
-                    return min_total, max_total, y_min, y_max, step
-
-                escala_y1_manual = None
-                escala_y2_manual = None
-
-                st.markdown("**Escalas**")
-                st.caption("Mové los extremos de cada barra para ajustar el rango visible.")
-
+            if usar_escalas_manual:
                 if variables_y1:
                     datos_y1 = pd.concat(
                         [
@@ -2133,24 +2123,22 @@ with tab1:
                         axis=0,
                     )
 
-                    rango_y1 = _rango_con_margen(datos_y1)
+                    rango_y1 = _rango_ampliado(datos_y1, factor=2.5)
 
                     if rango_y1 is not None:
                         y1_min_total, y1_max_total, y1_min_auto, y1_max_auto, y1_step = rango_y1
-
-                        y1_rango = st.slider(
-                            "Eje izquierdo",
+                        y1_rango = st.sidebar.slider(
+                            "Rango eje Y izquierdo",
                             min_value=float(y1_min_total),
                             max_value=float(y1_max_total),
                             value=(float(y1_min_auto), float(y1_max_auto)),
                             step=float(y1_step),
                             key=(
-                                f"slider_y1_{unidad}_{agrupacion}_"
+                                f"slider_y1_sidebar_{unidad}_{agrupacion}_"
                                 f"{abs(hash(tuple(variables_y1)))}_"
                                 f"{round(y1_min_total, 3)}_{round(y1_max_total, 3)}"
                             ),
                         )
-
                         if y1_rango[0] < y1_rango[1]:
                             escala_y1_manual = (float(y1_rango[0]), float(y1_rango[1]))
 
@@ -2164,143 +2152,151 @@ with tab1:
                         axis=0,
                     )
 
-                    rango_y2 = _rango_con_margen(datos_y2)
+                    rango_y2 = _rango_ampliado(datos_y2, factor=2.5)
 
                     if rango_y2 is not None:
                         y2_min_total, y2_max_total, y2_min_auto, y2_max_auto, y2_step = rango_y2
-
-                        y2_rango = st.slider(
-                            "Eje derecho",
+                        y2_rango = st.sidebar.slider(
+                            "Rango eje Y derecho",
                             min_value=float(y2_min_total),
                             max_value=float(y2_max_total),
                             value=(float(y2_min_auto), float(y2_max_auto)),
                             step=float(y2_step),
                             key=(
-                                f"slider_y2_{unidad}_{agrupacion}_"
+                                f"slider_y2_sidebar_{unidad}_{agrupacion}_"
                                 f"{abs(hash(tuple(variables_y2)))}_"
                                 f"{round(y2_min_total, 3)}_{round(y2_max_total, 3)}"
                             ),
                         )
-
                         if y2_rango[0] < y2_rango[1]:
                             escala_y2_manual = (float(y2_rango[0]), float(y2_rango[1]))
 
-            with col_grafico:
-                if usar_y2_efectivo:
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                else:
-                    fig = go.Figure()
+            if usar_y2_efectivo:
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+            else:
+                fig = go.Figure()
 
-                for v in variables_grafico:
-                    nombre_traza = nombres_legibles[v]
+            for v in variables_grafico:
+                nombre_traza = nombres_legibles[v]
 
-                    # En la vista rapida, acortamos nombres para que la leyenda
-                    # no vuelva a ocupar espacio lateral.
-                    if grafico_rendimiento_target:
-                        if v == "Rendimiento":
-                            nombre_traza = "Rendimiento real"
-                        elif v == "Productividad_estimada":
-                            nombre_traza = "Rendimiento estimado"
+                if grafico_rendimiento_target:
+                    if v == "Rendimiento":
+                        nombre_traza = "Rendimiento real"
+                    elif v == "Productividad_estimada":
+                        nombre_traza = "Rendimiento estimado"
 
-                    modo_traza = "lines+markers"
-
-                    if unidad.startswith("Polimer") and "Producto" in df_f.columns:
-                        producto_hover = (
-                            df_f["Producto"]
-                            .map(normalizar_producto_operativo)
-                            .astype("string")
-                            .fillna("")
-                        )
-
-                        if filtro_producto_activo:
-                            x_plot, y_plot = preparar_serie_producto_filtrado_para_grafico(
-                                df_f,
-                                v,
-                                agrupacion,
-                            )
-                        else:
-                            x_plot = df_f["Fecha_y_hora"]
-                            y_plot = df_f[v]
-
-                        traza = go.Scatter(
-                            x=x_plot,
-                            y=y_plot,
-                            name=nombre_traza,
-                            mode=modo_traza,
-                            connectgaps=False,
-                            customdata=producto_hover,
-                            hovertemplate=(
-                                "%{fullData.name}<br>"
-                                "Fecha: %{x}<br>"
-                                "Valor: %{y}<br>"
-                                "Producto: %{customdata}"
-                                "<extra></extra>"
-                            ),
-                        )
-
-                        if usar_y2_efectivo:
-                            fig.add_trace(traza, secondary_y=(v in variables_y2))
-                        else:
-                            fig.add_trace(traza)
-                    else:
-                        traza = go.Scatter(
-                            x=df_f["Fecha_y_hora"],
-                            y=df_f[v],
-                            name=nombre_traza,
-                            mode=modo_traza,
-                            connectgaps=False,
-                        )
-
-                        if usar_y2_efectivo:
-                            fig.add_trace(traza, secondary_y=(v in variables_y2))
-                        else:
-                            fig.add_trace(traza)
-
-                fig.update_layout(
-                    height=650,
-                    hovermode="x unified",
-                    margin=dict(
-                        t=40,
-                        b=120,
-                        l=70,
-                        r=110 if usar_y2_efectivo else 50,
-                    ),
-                    legend=dict(
-                        orientation="h",
-                        y=-0.20,
-                        x=0.5,
-                        xanchor="center",
-                        yanchor="top",
-                    ),
-                )
-
-                if usar_y2_efectivo:
-                    titulo_y1 = " / ".join([nombres_legibles[v] for v in variables_y1[:2]]) if variables_y1 else "Eje izquierdo"
-                    titulo_y2 = " / ".join([nombres_legibles[v] for v in variables_y2[:2]]) if variables_y2 else "Eje derecho"
-
-                    fig.update_yaxes(title_text=titulo_y1, secondary_y=False, showgrid=True)
-                    fig.update_yaxes(title_text=titulo_y2, secondary_y=True, showgrid=False)
-
-                    if escala_y1_manual is not None:
-                        fig.update_yaxes(range=list(escala_y1_manual), secondary_y=False)
-
-                    if escala_y2_manual is not None:
-                        fig.update_yaxes(range=list(escala_y2_manual), secondary_y=True)
-                else:
-                    if escala_y1_manual is not None:
-                        fig.update_yaxes(range=list(escala_y1_manual))
+                modo_traza = "lines+markers"
 
                 if unidad.startswith("Polimer") and "Producto" in df_f.columns:
+                    producto_hover = (
+                        df_f["Producto"]
+                        .map(normalizar_producto_operativo)
+                        .astype("string")
+                        .fillna("")
+                    )
+
                     if filtro_producto_activo:
-                        st.caption(
-                            "Filtro por producto activo: se unen solo puntos consecutivos "
-                            "y se corta la línea cuando hay saltos entre campañas."
+                        x_plot, y_plot = preparar_serie_producto_filtrado_para_grafico(
+                            df_f,
+                            v,
+                            agrupacion,
                         )
                     else:
-                        fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=False)
-                        st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
+                        x_plot = df_f["Fecha_y_hora"]
+                        y_plot = df_f[v]
 
-                st.plotly_chart(fig, use_container_width=True)
+                    traza = go.Scatter(
+                        x=x_plot,
+                        y=y_plot,
+                        name=nombre_traza,
+                        mode=modo_traza,
+                        connectgaps=False,
+                        customdata=producto_hover,
+                        hovertemplate=(
+                            "%{fullData.name}<br>"
+                            "Fecha: %{x}<br>"
+                            "Valor: %{y}<br>"
+                            "Producto: %{customdata}"
+                            "<extra></extra>"
+                        ),
+                    )
+                else:
+                    traza = go.Scatter(
+                        x=df_f["Fecha_y_hora"],
+                        y=df_f[v],
+                        name=nombre_traza,
+                        mode=modo_traza,
+                        connectgaps=False,
+                    )
+
+                if usar_y2_efectivo:
+                    fig.add_trace(traza, secondary_y=(v in variables_y2))
+                else:
+                    fig.add_trace(traza)
+
+            fig.update_layout(
+                height=680,
+                hovermode="x unified",
+                margin=dict(
+                    t=40,
+                    b=120,
+                    l=70,
+                    r=110 if usar_y2_efectivo else 50,
+                ),
+                legend=dict(
+                    orientation="h",
+                    y=-0.26,
+                    x=0.5,
+                    xanchor="center",
+                    yanchor="top",
+                ),
+            )
+
+            # Barra horizontal nativa de Plotly para el eje X.
+            fig.update_xaxes(
+                rangeslider=dict(visible=True, thickness=0.08),
+                rangeselector=dict(
+                    buttons=list([
+                        dict(count=7, label="7d", step="day", stepmode="backward"),
+                        dict(count=1, label="1m", step="month", stepmode="backward"),
+                        dict(count=3, label="3m", step="month", stepmode="backward"),
+                        dict(step="all", label="Todo"),
+                    ])
+                ),
+            )
+
+            if usar_y2_efectivo:
+                titulo_y1 = " / ".join([nombres_legibles[v] for v in variables_y1[:2]]) if variables_y1 else "Eje izquierdo"
+                titulo_y2 = " / ".join([nombres_legibles[v] for v in variables_y2[:2]]) if variables_y2 else "Eje derecho"
+
+                fig.update_yaxes(title_text=titulo_y1, secondary_y=False, showgrid=True, fixedrange=False)
+                fig.update_yaxes(title_text=titulo_y2, secondary_y=True, showgrid=False, fixedrange=False)
+
+                if escala_y1_manual is not None:
+                    fig.update_yaxes(range=list(escala_y1_manual), secondary_y=False)
+
+                if escala_y2_manual is not None:
+                    fig.update_yaxes(range=list(escala_y2_manual), secondary_y=True)
+            else:
+                fig.update_yaxes(fixedrange=False)
+                if escala_y1_manual is not None:
+                    fig.update_yaxes(range=list(escala_y1_manual))
+
+            if unidad.startswith("Polimer") and "Producto" in df_f.columns:
+                if filtro_producto_activo:
+                    st.caption(
+                        "Filtro por producto activo: se unen solo puntos consecutivos "
+                        "y se corta la línea cuando hay saltos entre campañas."
+                    )
+                else:
+                    fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=False)
+                    st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
+
+            st.caption(
+                "En modo combinado, el eje X tiene barra inferior de zoom/rango. "
+                "Las variables del eje derecho se eligen desde el panel izquierdo."
+            )
+            st.plotly_chart(fig, use_container_width=True)
         else:
             n = len(variables_grafico)
             altura_por_grafico = 300
