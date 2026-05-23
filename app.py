@@ -1157,41 +1157,12 @@ if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimie
         help="Grafica solo Rendimiento real y Rendimiento estimado, sin modificar la seleccion general de variables.",
     )
 
-# Segundo eje Y para gráficos combinados.
-# Útil cuando las variables tienen escalas muy diferentes.
-usar_eje_y2_combinado = False
-variables_eje_y2 = []
+# En modo Combinados el segundo eje Y se activa automáticamente
+# cuando hay dos o más variables:
+# - primera variable: eje izquierdo
+# - segunda y siguientes: eje derecho
 escala_y1_manual = None
 escala_y2_manual = None
-
-if modo_grafico == "Combinados" or grafico_rendimiento_target:
-    opciones_eje_y2 = ["Rendimiento", "Productividad_estimada"] if grafico_rendimiento_target else list(variables_sel)
-    opciones_eje_y2 = [v for v in opciones_eje_y2 if v in todas_variables]
-
-    if len(opciones_eje_y2) >= 2:
-        usar_eje_y2_combinado = st.sidebar.checkbox(
-            "Usar segundo eje Y en gráfico combinado",
-            value=True,
-            help=(
-                "Permite graficar algunas variables contra el eje izquierdo "
-                "y otras contra el eje derecho para mejorar la escala visual."
-            ),
-        )
-
-        if usar_eje_y2_combinado:
-            variables_eje_y2 = st.sidebar.multiselect(
-                "Variables en eje derecho:",
-                options=opciones_eje_y2,
-                default=opciones_eje_y2[1:],
-                format_func=lambda x: nombres_legibles[x],
-                key=f"variables_eje_y2_{unidad}",
-            )
-
-            if variables_eje_y2:
-                st.sidebar.caption(
-                    "Eje derecho: "
-                    + ", ".join([nombres_legibles[v] for v in variables_eje_y2])
-                )
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Agrupacion temporal")
@@ -2066,18 +2037,29 @@ with tab1:
             st.caption("Vista rapida: Rendimiento real vs rendimiento estimado por producto. Esta opcion no cambia la seleccion general de variables.")
 
         if modo_grafico_efectivo == "Combinados":
-            usar_y2_efectivo = usar_eje_y2_combinado and len(variables_eje_y2) > 0
-
-            variables_y2 = [v for v in variables_grafico if v in variables_eje_y2] if usar_y2_efectivo else []
-            variables_y1 = [v for v in variables_grafico if v not in variables_eje_y2] if usar_y2_efectivo else list(variables_grafico)
+            # Segundo eje Y automático:
+            # si se combinan 2 o más variables, la primera queda en el eje izquierdo
+            # y las demás quedan en el eje derecho. Si hay una sola variable, no se
+            # muestra eje secundario.
+            usar_y2_efectivo = len(variables_grafico) >= 2
+            variables_y1 = [variables_grafico[0]] if variables_grafico else []
+            variables_y2 = variables_grafico[1:] if usar_y2_efectivo else []
 
             escala_y1_manual = None
             escala_y2_manual = None
 
             with st.expander("Escalas del gráfico combinado", expanded=False):
-                st.caption(
-                    "Usá estos controles si las escalas automáticas no permiten comparar bien las variables."
-                )
+                if usar_y2_efectivo:
+                    st.caption(
+                        "El modo combinado usa segundo eje Y automáticamente: "
+                        "la primera variable queda en el eje izquierdo y las demás en el eje derecho. "
+                        "Podés fijar manualmente los rangos si la escala automática no es conveniente."
+                    )
+                else:
+                    st.caption(
+                        "Hay una sola variable combinada, por eso se usa solo eje izquierdo. "
+                        "Podés fijar manualmente el rango si la escala automática no es conveniente."
+                    )
 
                 if variables_y1:
                     datos_y1 = pd.concat(
@@ -2265,7 +2247,7 @@ with tab1:
                     fig.update_yaxes(range=list(escala_y2_manual), secondary_y=True)
 
                 st.caption(
-                    "Gráfico combinado con dos ejes Y: eje izquierdo para "
+                    "Gráfico combinado con eje secundario automático: eje izquierdo para "
                     + (", ".join([nombres_legibles[v] for v in variables_y1]) if variables_y1 else "sin variables")
                     + "; eje derecho para "
                     + (", ".join([nombres_legibles[v] for v in variables_y2]) if variables_y2 else "sin variables")
