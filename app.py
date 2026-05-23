@@ -1161,6 +1161,8 @@ if unidad.startswith("Polimer") and all(v in todas_variables for v in ["Rendimie
 # Útil cuando las variables tienen escalas muy diferentes.
 usar_eje_y2_combinado = False
 variables_eje_y2 = []
+escala_y1_manual = None
+escala_y2_manual = None
 
 if modo_grafico == "Combinados" or grafico_rendimiento_target:
     opciones_eje_y2 = ["Rendimiento", "Productividad_estimada"] if grafico_rendimiento_target else list(variables_sel)
@@ -1169,7 +1171,7 @@ if modo_grafico == "Combinados" or grafico_rendimiento_target:
     if len(opciones_eje_y2) >= 2:
         usar_eje_y2_combinado = st.sidebar.checkbox(
             "Usar segundo eje Y en gráfico combinado",
-            value=False,
+            value=True,
             help=(
                 "Permite graficar algunas variables contra el eje izquierdo "
                 "y otras contra el eje derecho para mejorar la escala visual."
@@ -2066,6 +2068,101 @@ with tab1:
         if modo_grafico_efectivo == "Combinados":
             usar_y2_efectivo = usar_eje_y2_combinado and len(variables_eje_y2) > 0
 
+            variables_y2 = [v for v in variables_grafico if v in variables_eje_y2] if usar_y2_efectivo else []
+            variables_y1 = [v for v in variables_grafico if v not in variables_eje_y2] if usar_y2_efectivo else list(variables_grafico)
+
+            escala_y1_manual = None
+            escala_y2_manual = None
+
+            with st.expander("Escalas del gráfico combinado", expanded=False):
+                st.caption(
+                    "Usá estos controles si las escalas automáticas no permiten comparar bien las variables."
+                )
+
+                if variables_y1:
+                    datos_y1 = pd.concat(
+                        [
+                            pd.to_numeric(df_f[v], errors="coerce")
+                            for v in variables_y1
+                            if v in df_f.columns
+                        ],
+                        axis=0,
+                    ).dropna()
+
+                    if len(datos_y1) > 0:
+                        y1_min_auto = float(datos_y1.min())
+                        y1_max_auto = float(datos_y1.max())
+
+                        usar_y1_manual = st.checkbox(
+                            "Fijar escala eje izquierdo",
+                            value=False,
+                            key=f"usar_y1_manual_{unidad}_{agrupacion}",
+                        )
+
+                        if usar_y1_manual:
+                            col_y1_min, col_y1_max = st.columns(2)
+                            with col_y1_min:
+                                y1_min = st.number_input(
+                                    "Y izquierdo mínimo",
+                                    value=y1_min_auto,
+                                    key=f"y1_min_{unidad}_{agrupacion}",
+                                    format="%.4f",
+                                )
+                            with col_y1_max:
+                                y1_max = st.number_input(
+                                    "Y izquierdo máximo",
+                                    value=y1_max_auto,
+                                    key=f"y1_max_{unidad}_{agrupacion}",
+                                    format="%.4f",
+                                )
+
+                            if y1_min < y1_max:
+                                escala_y1_manual = (float(y1_min), float(y1_max))
+                            else:
+                                st.warning("El mínimo del eje izquierdo debe ser menor que el máximo.")
+
+                if usar_y2_efectivo and variables_y2:
+                    datos_y2 = pd.concat(
+                        [
+                            pd.to_numeric(df_f[v], errors="coerce")
+                            for v in variables_y2
+                            if v in df_f.columns
+                        ],
+                        axis=0,
+                    ).dropna()
+
+                    if len(datos_y2) > 0:
+                        y2_min_auto = float(datos_y2.min())
+                        y2_max_auto = float(datos_y2.max())
+
+                        usar_y2_manual = st.checkbox(
+                            "Fijar escala eje derecho",
+                            value=False,
+                            key=f"usar_y2_manual_{unidad}_{agrupacion}",
+                        )
+
+                        if usar_y2_manual:
+                            col_y2_min, col_y2_max = st.columns(2)
+                            with col_y2_min:
+                                y2_min = st.number_input(
+                                    "Y derecho mínimo",
+                                    value=y2_min_auto,
+                                    key=f"y2_min_{unidad}_{agrupacion}",
+                                    format="%.4f",
+                                )
+                            with col_y2_max:
+                                y2_max = st.number_input(
+                                    "Y derecho máximo",
+                                    value=y2_max_auto,
+                                    key=f"y2_max_{unidad}_{agrupacion}",
+                                    format="%.4f",
+                                )
+
+                            if y2_min < y2_max:
+                                escala_y2_manual = (float(y2_min), float(y2_max))
+                            else:
+                                st.warning("El mínimo del eje derecho debe ser menor que el máximo.")
+
             if usar_y2_efectivo:
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
             else:
@@ -2139,7 +2236,12 @@ with tab1:
             fig.update_layout(
                 height=650,
                 hovermode="x unified",
-                margin=dict(t=40, b=120, l=40, r=40),
+                margin=dict(
+                    t=40,
+                    b=120,
+                    l=70,
+                    r=110 if usar_y2_efectivo else 50,
+                ),
                 legend=dict(
                     orientation="h",
                     y=-0.20,
@@ -2150,14 +2252,17 @@ with tab1:
             )
 
             if usar_y2_efectivo:
-                variables_y2 = [v for v in variables_grafico if v in variables_eje_y2]
-                variables_y1 = [v for v in variables_grafico if v not in variables_eje_y2]
-
                 titulo_y1 = " / ".join([nombres_legibles[v] for v in variables_y1[:2]]) if variables_y1 else "Eje izquierdo"
                 titulo_y2 = " / ".join([nombres_legibles[v] for v in variables_y2[:2]]) if variables_y2 else "Eje derecho"
 
-                fig.update_yaxes(title_text=titulo_y1, secondary_y=False)
-                fig.update_yaxes(title_text=titulo_y2, secondary_y=True)
+                fig.update_yaxes(title_text=titulo_y1, secondary_y=False, showgrid=True)
+                fig.update_yaxes(title_text=titulo_y2, secondary_y=True, showgrid=False)
+
+                if escala_y1_manual is not None:
+                    fig.update_yaxes(range=list(escala_y1_manual), secondary_y=False)
+
+                if escala_y2_manual is not None:
+                    fig.update_yaxes(range=list(escala_y2_manual), secondary_y=True)
 
                 st.caption(
                     "Gráfico combinado con dos ejes Y: eje izquierdo para "
@@ -2166,6 +2271,9 @@ with tab1:
                     + (", ".join([nombres_legibles[v] for v in variables_y2]) if variables_y2 else "sin variables")
                     + "."
                 )
+            else:
+                if escala_y1_manual is not None:
+                    fig.update_yaxes(range=list(escala_y1_manual))
 
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
                 if filtro_producto_activo:
