@@ -1192,11 +1192,12 @@ st.sidebar.subheader("Escalas Y")
 usar_escalas_manual = st.sidebar.checkbox(
     "Ajustar escalas Y",
     value=False,
-    help="Permite mover el rango visible de los ejes Y. El rango disponible queda ampliado respecto al automático.",
+    help="Permite fijar manualmente los mínimos y máximos visibles de los ejes Y.",
 )
 
-if usar_escalas_manual:
-    st.sidebar.caption("Usá las barras de rango Y izquierdo/derecho que aparecen abajo.")
+# Contenedor fijo para los campos de escala. Se completa más adelante,
+# cuando ya existen df_f, variables_y1 y variables_y2.
+escala_y_sidebar_container = st.sidebar.container()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Agrupacion temporal")
@@ -2111,63 +2112,110 @@ with tab1:
             escala_y2_manual = None
 
             if usar_escalas_manual:
-                if variables_y1:
-                    datos_y1 = pd.concat(
-                        [
-                            pd.to_numeric(df_f[v], errors="coerce")
-                            for v in variables_y1
-                            if v in df_f.columns
-                        ],
-                        axis=0,
-                    )
+                with escala_y_sidebar_container:
+                    st.caption("Ingresá mínimo y máximo visible de cada eje.")
 
-                    rango_y1 = _rango_ampliado(datos_y1, factor=5.0)
-
-                    if rango_y1 is not None:
-                        y1_min_total, y1_max_total, y1_min_auto, y1_max_auto, y1_step = rango_y1
-                        y1_rango = st.sidebar.slider(
-                            "Rango eje Y izquierdo",
-                            min_value=float(y1_min_total),
-                            max_value=float(y1_max_total),
-                            value=(float(y1_min_auto), float(y1_max_auto)),
-                            step=float(y1_step),
-                            key=(
-                                f"slider_y1_sidebar_{unidad}_{agrupacion}_"
-                                f"{abs(hash(tuple(variables_y1)))}_"
-                                f"{round(y1_min_total, 3)}_{round(y1_max_total, 3)}"
-                            ),
+                    if variables_y1:
+                        datos_y1 = pd.concat(
+                            [
+                                pd.to_numeric(df_f[v], errors="coerce")
+                                for v in variables_y1
+                                if v in df_f.columns
+                            ],
+                            axis=0,
                         )
-                        if y1_rango[0] < y1_rango[1]:
-                            escala_y1_manual = (float(y1_rango[0]), float(y1_rango[1]))
 
-                if usar_y2_efectivo and variables_y2:
-                    datos_y2 = pd.concat(
-                        [
-                            pd.to_numeric(df_f[v], errors="coerce")
-                            for v in variables_y2
-                            if v in df_f.columns
-                        ],
-                        axis=0,
-                    )
+                        rango_y1 = _rango_ampliado(datos_y1, factor=8.0)
 
-                    rango_y2 = _rango_ampliado(datos_y2, factor=5.0)
+                        if rango_y1 is not None:
+                            y1_min_total, y1_max_total, y1_min_auto, y1_max_auto, y1_step = rango_y1
 
-                    if rango_y2 is not None:
-                        y2_min_total, y2_max_total, y2_min_auto, y2_max_auto, y2_step = rango_y2
-                        y2_rango = st.sidebar.slider(
-                            "Rango eje Y derecho",
-                            min_value=float(y2_min_total),
-                            max_value=float(y2_max_total),
-                            value=(float(y2_min_auto), float(y2_max_auto)),
-                            step=float(y2_step),
-                            key=(
-                                f"slider_y2_sidebar_{unidad}_{agrupacion}_"
-                                f"{abs(hash(tuple(variables_y2)))}_"
-                                f"{round(y2_min_total, 3)}_{round(y2_max_total, 3)}"
-                            ),
+                            st.markdown("**Eje Y izquierdo**")
+                            c_y1_min, c_y1_max = st.columns(2)
+                            with c_y1_min:
+                                y1_min = st.number_input(
+                                    "Min",
+                                    min_value=float(y1_min_total),
+                                    max_value=float(y1_max_total),
+                                    value=float(y1_min_auto),
+                                    step=float(y1_step),
+                                    key=(
+                                        f"num_y1_min_{unidad}_{agrupacion}_"
+                                        f"{abs(hash(tuple(variables_y1)))}_"
+                                        f"{round(y1_min_total, 3)}_{round(y1_max_total, 3)}"
+                                    ),
+                                    format="%.4f",
+                                )
+                            with c_y1_max:
+                                y1_max = st.number_input(
+                                    "Max",
+                                    min_value=float(y1_min_total),
+                                    max_value=float(y1_max_total),
+                                    value=float(y1_max_auto),
+                                    step=float(y1_step),
+                                    key=(
+                                        f"num_y1_max_{unidad}_{agrupacion}_"
+                                        f"{abs(hash(tuple(variables_y1)))}_"
+                                        f"{round(y1_min_total, 3)}_{round(y1_max_total, 3)}"
+                                    ),
+                                    format="%.4f",
+                                )
+
+                            if y1_min < y1_max:
+                                escala_y1_manual = (float(y1_min), float(y1_max))
+                            else:
+                                st.warning("Y izquierdo: Min debe ser menor que Max.")
+
+                    if usar_y2_efectivo and variables_y2:
+                        datos_y2 = pd.concat(
+                            [
+                                pd.to_numeric(df_f[v], errors="coerce")
+                                for v in variables_y2
+                                if v in df_f.columns
+                            ],
+                            axis=0,
                         )
-                        if y2_rango[0] < y2_rango[1]:
-                            escala_y2_manual = (float(y2_rango[0]), float(y2_rango[1]))
+
+                        rango_y2 = _rango_ampliado(datos_y2, factor=8.0)
+
+                        if rango_y2 is not None:
+                            y2_min_total, y2_max_total, y2_min_auto, y2_max_auto, y2_step = rango_y2
+
+                            st.markdown("**Eje Y derecho**")
+                            c_y2_min, c_y2_max = st.columns(2)
+                            with c_y2_min:
+                                y2_min = st.number_input(
+                                    "Min ",
+                                    min_value=float(y2_min_total),
+                                    max_value=float(y2_max_total),
+                                    value=float(y2_min_auto),
+                                    step=float(y2_step),
+                                    key=(
+                                        f"num_y2_min_{unidad}_{agrupacion}_"
+                                        f"{abs(hash(tuple(variables_y2)))}_"
+                                        f"{round(y2_min_total, 3)}_{round(y2_max_total, 3)}"
+                                    ),
+                                    format="%.4f",
+                                )
+                            with c_y2_max:
+                                y2_max = st.number_input(
+                                    "Max ",
+                                    min_value=float(y2_min_total),
+                                    max_value=float(y2_max_total),
+                                    value=float(y2_max_auto),
+                                    step=float(y2_step),
+                                    key=(
+                                        f"num_y2_max_{unidad}_{agrupacion}_"
+                                        f"{abs(hash(tuple(variables_y2)))}_"
+                                        f"{round(y2_min_total, 3)}_{round(y2_max_total, 3)}"
+                                    ),
+                                    format="%.4f",
+                                )
+
+                            if y2_min < y2_max:
+                                escala_y2_manual = (float(y2_min), float(y2_max))
+                            else:
+                                st.warning("Y derecho: Min debe ser menor que Max.")
 
             if usar_y2_efectivo:
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -2233,17 +2281,17 @@ with tab1:
                     fig.add_trace(traza)
 
             fig.update_layout(
-                height=680,
+                height=660,
                 hovermode="x unified",
                 margin=dict(
-                    t=40,
-                    b=120,
+                    t=35,
+                    b=75,
                     l=70,
                     r=110 if usar_y2_efectivo else 50,
                 ),
                 legend=dict(
                     orientation="h",
-                    y=-0.26,
+                    y=-0.13,
                     x=0.5,
                     xanchor="center",
                     yanchor="top",
@@ -2278,8 +2326,7 @@ with tab1:
                     st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
 
             st.caption(
-                "En modo combinado, las variables del eje derecho se eligen desde el panel izquierdo. "
-                "Para ajustar el rango Y, activá 'Ajustar escalas manualmente' en la barra lateral."
+                "En modo combinado, las variables del eje derecho y los rangos Y se ajustan desde el panel izquierdo."
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
