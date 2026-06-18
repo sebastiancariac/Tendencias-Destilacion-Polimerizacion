@@ -485,13 +485,69 @@ def preparar_serie_producto_filtrado_para_grafico(df_plot, y_col, agrupacion):
     return df_linea["Fecha_y_hora"], y
 
 
-def agregar_marcas_producto_a_figura(fig, df_plot, en_subplots=False, max_marcas=35):
+def agregar_marcas_producto_a_figura(
+    fig,
+    df_plot,
+    en_subplots=False,
+    mostrar_etiquetas=True,
+):
     """
-    Agrega marcas verticales con el producto/campaña en la gráfica.
-    Limita la cantidad para evitar saturar la visualización.
+    Agrega líneas verticales en todos los cambios de producto/campaña.
+
+    - No limita la cantidad de marcas ni recorta al comienzo del período.
+    - Si hay demasiados cambios, mantiene todas las líneas pero omite los textos
+      para no saturar la gráfica.
     """
     if "Producto" not in df_plot.columns or "Fecha_y_hora" not in df_plot.columns:
         return fig
+
+    datos_producto = df_plot[["Fecha_y_hora", "Producto"]].copy()
+    datos_producto["Producto"] = datos_producto["Producto"].map(normalizar_producto_operativo)
+    datos_producto = datos_producto.dropna(subset=["Fecha_y_hora", "Producto"])
+
+    if len(datos_producto) == 0:
+        return fig
+
+    datos_producto = datos_producto.sort_values("Fecha_y_hora")
+    cambios = datos_producto.loc[
+        datos_producto["Producto"].astype(str).ne(
+            datos_producto["Producto"].astype(str).shift()
+        )
+    ].copy()
+
+    if len(cambios) == 0:
+        return fig
+
+    # Cuando hay muchas transiciones, dibujar todas las líneas pero evitar
+    # superponer decenas de rótulos en la parte superior.
+    usar_texto = mostrar_etiquetas and len(cambios) <= 18
+
+    for _, fila in cambios.iterrows():
+        try:
+            kwargs = dict(
+                x=fila["Fecha_y_hora"],
+                line_width=1,
+                line_dash="dot",
+                opacity=0.45,
+            )
+
+            if usar_texto:
+                kwargs.update(
+                    annotation_text=str(fila["Producto"]),
+                    annotation_position="top",
+                    annotation_font_size=9,
+                )
+
+            if en_subplots:
+                fig.add_vline(row="all", col=1, **kwargs)
+            else:
+                fig.add_vline(**kwargs)
+
+        except Exception:
+            # Las marcas son auxiliares y nunca deben romper la app.
+            pass
+
+    return fig
 
     datos_producto = df_plot[["Fecha_y_hora", "Producto"]].copy()
     datos_producto["Producto"] = datos_producto["Producto"].map(normalizar_producto_operativo)
@@ -1156,6 +1212,17 @@ if variables_sel:
 st.sidebar.markdown("---")
 st.sidebar.subheader("Modo de grafico")
 modo_grafico = st.sidebar.radio("Modo:", options=["Separados", "Combinados"], index=0)
+
+mostrar_cambios_producto = False
+if unidad.startswith("Polimer"):
+    mostrar_cambios_producto = st.sidebar.checkbox(
+        "Mostrar cambios de grado",
+        value=False,
+        help=(
+            "Dibuja una línea vertical en cada cambio de producto/campaña "
+            "a lo largo de todo el período visible."
+        ),
+    )
 
 # Se elimina la opción rápida "Rendimiento real vs estimado".
 # Con el modo Combinados + selección de variables + eje Y secundario, ya no hace falta.
@@ -2321,9 +2388,17 @@ with tab1:
                         "Filtro por producto activo: se unen solo puntos consecutivos "
                         "y se corta la línea cuando hay saltos entre campañas."
                     )
-                else:
-                    fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=False)
-                    st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
+                elif mostrar_cambios_producto:
+                    fig = agregar_marcas_producto_a_figura(
+                        fig,
+                        df_f,
+                        en_subplots=False,
+                        mostrar_etiquetas=True,
+                    )
+                    st.caption(
+                        "Las líneas verticales punteadas muestran todos los cambios "
+                        "de producto/campaña del período visible."
+                    )
 
             st.caption(
                 "En modo combinado, las variables del eje derecho y los rangos Y se ajustan desde el panel izquierdo."
@@ -2411,9 +2486,17 @@ with tab1:
                         "Filtro por producto activo: se unen solo puntos consecutivos "
                         "y se corta la línea cuando hay saltos entre campañas."
                     )
-                else:
-                    fig = agregar_marcas_producto_a_figura(fig, df_f, en_subplots=True)
-                    st.caption("Las líneas verticales punteadas indican cambios de producto/campaña.")
+                elif mostrar_cambios_producto:
+                    fig = agregar_marcas_producto_a_figura(
+                        fig,
+                        df_f,
+                        en_subplots=True,
+                        mostrar_etiquetas=True,
+                    )
+                    st.caption(
+                        "Las líneas verticales punteadas muestran todos los cambios "
+                        "de producto/campaña del período visible."
+                    )
 
             st.plotly_chart(fig, use_container_width=True)
 
