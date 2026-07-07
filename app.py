@@ -795,69 +795,83 @@ def cargar_datos(
 # SIDEBAR - SELECTORES
 # ==============================================================================
 
-st.sidebar.header("Unidad")
-unidad = st.sidebar.radio("Seleccionar unidad:", options=list(CONFIG_UNIDADES.keys()))
+# Contenedores visuales del sidebar.
+# El contenido se llena en distintos momentos del script, pero queda ordenado así:
+# 1) Controles principales de uso diario
+# 2) Modelo de rendimiento estimado
+# 3) Datos / validación del Excel
+# 4) Herramientas avanzadas
+sidebar_principal = st.sidebar.container()
+sidebar_modelo = st.sidebar.container()
+sidebar_datos = st.sidebar.container()
+sidebar_herramientas = st.sidebar.container()
+
+with sidebar_principal:
+    st.header("Unidad")
+    unidad = st.radio("Seleccionar unidad:", options=list(CONFIG_UNIDADES.keys()))
 
 config = CONFIG_UNIDADES[unidad]
 nombres_legibles = dict(config["variables"])
 todas_variables = list(nombres_legibles.keys())
 default_vars = list(config["default_vars"])
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Fuente de datos")
+with sidebar_datos:
+    st.markdown("---")
+    st.subheader("Datos y validación")
 
-fuente_datos = st.sidebar.radio(
-    "Seleccionar fuente:",
-    options=["Cargar Excel manualmente", "Usar Excel de la carpeta"],
-    index=0,
-)
-
-excel_bytes = None
-excel_mtime = None
-
-if fuente_datos == "Cargar Excel manualmente":
-    archivo_cargado = st.sidebar.file_uploader(
-        "Cargar archivo Excel",
-        type=["xlsx", "xlsm", "xls"],
+    fuente_datos = st.radio(
+        "Seleccionar fuente:",
+        options=["Cargar Excel manualmente", "Usar Excel de la carpeta"],
+        index=0,
     )
 
-    if archivo_cargado is None:
-        st.info("Cargá un archivo Excel desde la barra lateral para comenzar el análisis.")
+    excel_bytes = None
+    excel_mtime = None
+
+    if fuente_datos == "Cargar Excel manualmente":
+        archivo_cargado = st.file_uploader(
+            "Cargar archivo Excel",
+            type=["xlsx", "xlsm", "xls"],
+        )
+
+        if archivo_cargado is None:
+            st.info("Cargá un archivo Excel desde la barra lateral para comenzar el análisis.")
+            st.stop()
+
+        excel_bytes = archivo_cargado.getvalue()
+        st.success(f"Archivo cargado: {archivo_cargado.name}")
+    else:
+        excel_mtime = obtener_mtime_archivo()
+
+    if st.button("Actualizar datos", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+    df, mapeo_columnas = cargar_datos(
+        config["hoja"],
+        todas_variables,
+        nombres_legibles,
+        excel_mtime,
+        excel_bytes,
+    )
+
+    if df.empty:
+        st.warning("La hoja seleccionada no tiene datos validos de fecha/hora.")
         st.stop()
 
-    excel_bytes = archivo_cargado.getvalue()
-    st.sidebar.success(f"Archivo cargado: {archivo_cargado.name}")
-else:
-    excel_mtime = obtener_mtime_archivo()
+    st.caption(f"Hoja: {config['hoja']} | Registros crudos: {len(df):,}")
 
-if st.sidebar.button("Actualizar datos", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
+    if not mapeo_columnas.empty:
+        errores_mapeo = mapeo_columnas[mapeo_columnas["Estado"] != "OK"]
 
-df, mapeo_columnas = cargar_datos(
-    config["hoja"],
-    todas_variables,
-    nombres_legibles,
-    excel_mtime,
-    excel_bytes,
-)
+        if len(errores_mapeo) > 0:
+            st.error(f"Hay {len(errores_mapeo)} variables sin mapear. Revisar Excel/app.")
+        else:
+            st.success("Columnas validadas por TAG IP21")
 
-if df.empty:
-    st.warning("La hoja seleccionada no tiene datos validos de fecha/hora.")
-    st.stop()
+        with st.expander("Validacion columnas Excel", expanded=False):
+            st.dataframe(mapeo_columnas, use_container_width=True, hide_index=True)
 
-st.sidebar.caption(f"Hoja: {config['hoja']} | Registros crudos: {len(df):,}")
-
-if not mapeo_columnas.empty:
-    errores_mapeo = mapeo_columnas[mapeo_columnas["Estado"] != "OK"]
-
-    if len(errores_mapeo) > 0:
-        st.sidebar.error(f"Hay {len(errores_mapeo)} variables sin mapear. Revisar Excel/app.")
-    else:
-        st.sidebar.success("Columnas validadas por TAG IP21")
-
-    with st.sidebar.expander("Validacion columnas Excel", expanded=False):
-        st.dataframe(mapeo_columnas, use_container_width=True, hide_index=True)
 
 # ==============================================================================
 # VARIABLES CALCULADAS - FORMATO SIMPLE TIPO CARD
@@ -1056,7 +1070,7 @@ if unidad.startswith("Polimer") and all(
     variables_productividad = {
         "Productividad_estimada": "Rendimiento estimado",
         "Desvio_vs_productividad_estimada": "Desvio vs rendimiento estimado [Real - Estimado]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad estimacion por condicion reactor + C-Donor [%]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad modelo dic-25/feb-26 [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1069,347 +1083,351 @@ if unidad.startswith("Polimer") and all(
         default_vars.append("Productividad_estimada")
 
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Variables calculadas")
+with sidebar_herramientas:
+    st.markdown("---")
+    st.subheader("Herramientas avanzadas")
 
-key_defs = f"variables_calculadas_{unidad}"
-if key_defs not in st.session_state:
-    st.session_state[key_defs] = []
+    key_defs = f"variables_calculadas_{unidad}"
+    if key_defs not in st.session_state:
+        st.session_state[key_defs] = []
 
-with st.sidebar.expander("＋ Agregar variable calculada", expanded=False):
-    st.caption("Armá una variable nueva combinando dos variables existentes.")
+    with st.expander("＋ Agregar variable calculada", expanded=False):
+        st.caption("Armá una variable nueva combinando dos variables existentes.")
 
-    nombre_nueva = st.text_input(
-        "Nombre",
-        value="",
-        placeholder="Ejemplo: Relación TEA/C-Donor",
-        key=f"calc_nombre_nueva_{unidad}",
-    )
+        nombre_nueva = st.text_input(
+            "Nombre",
+            value="",
+            placeholder="Ejemplo: Relación TEA/C-Donor",
+            key=f"calc_nombre_nueva_{unidad}",
+        )
 
-    opciones_calc = list(nombres_legibles.keys())
+        opciones_calc = list(nombres_legibles.keys())
 
-    var_a_nueva = st.selectbox(
-        "Variable A",
-        options=opciones_calc,
-        format_func=lambda x: nombres_legibles[x],
-        key=f"calc_var_a_nueva_{unidad}",
-    )
+        var_a_nueva = st.selectbox(
+            "Variable A",
+            options=opciones_calc,
+            format_func=lambda x: nombres_legibles[x],
+            key=f"calc_var_a_nueva_{unidad}",
+        )
 
-    operacion_nueva = st.selectbox(
-        "Operación",
-        options=["+", "-", "×", "÷", "A/B × 100", "|A - B|", "Promedio"],
-        key=f"calc_operacion_nueva_{unidad}",
-    )
+        operacion_nueva = st.selectbox(
+            "Operación",
+            options=["+", "-", "×", "÷", "A/B × 100", "|A - B|", "Promedio"],
+            key=f"calc_operacion_nueva_{unidad}",
+        )
 
-    var_b_nueva = st.selectbox(
-        "Variable B",
-        options=opciones_calc,
-        index=min(1, len(opciones_calc) - 1),
-        format_func=lambda x: nombres_legibles[x],
-        key=f"calc_var_b_nueva_{unidad}",
-    )
+        var_b_nueva = st.selectbox(
+            "Variable B",
+            options=opciones_calc,
+            index=min(1, len(opciones_calc) - 1),
+            format_func=lambda x: nombres_legibles[x],
+            key=f"calc_var_b_nueva_{unidad}",
+        )
 
-    definicion_preview = {
-        "var_a": var_a_nueva,
-        "operacion": operacion_nueva,
-        "var_b": var_b_nueva,
-    }
-    st.caption("Vista previa")
-    st.code(texto_formula(definicion_preview))
+        definicion_preview = {
+            "var_a": var_a_nueva,
+            "operacion": operacion_nueva,
+            "var_b": var_b_nueva,
+        }
+        st.caption("Vista previa")
+        st.code(texto_formula(definicion_preview))
 
-    if st.button("Agregar", use_container_width=True, key=f"btn_agregar_calc_{unidad}"):
-        if not nombre_nueva.strip():
-            st.error("Escribí un nombre para la variable calculada.")
-        else:
-            numero = len(st.session_state[key_defs]) + 1
-            clave = f"Calc_{numero}"
-            definicion = {
-                "clave": clave,
-                "nombre": nombre_nueva.strip(),
-                "var_a": var_a_nueva,
-                "operacion": operacion_nueva,
-                "var_b": var_b_nueva,
-            }
-            st.session_state[key_defs].append(definicion)
-            st.success(f"Variable agregada: {nombre_nueva.strip()}")
-            st.rerun()
+        if st.button("Agregar", use_container_width=True, key=f"btn_agregar_calc_{unidad}"):
+            if not nombre_nueva.strip():
+                st.error("Escribí un nombre para la variable calculada.")
+            else:
+                numero = len(st.session_state[key_defs]) + 1
+                clave = f"Calc_{numero}"
+                definicion = {
+                    "clave": clave,
+                    "nombre": nombre_nueva.strip(),
+                    "var_a": var_a_nueva,
+                    "operacion": operacion_nueva,
+                    "var_b": var_b_nueva,
+                }
+                st.session_state[key_defs].append(definicion)
+                st.success(f"Variable agregada: {nombre_nueva.strip()}")
+                st.rerun()
 
-if st.session_state[key_defs]:
-    with st.sidebar.expander("Variables creadas", expanded=False):
-        for idx, definicion in enumerate(st.session_state[key_defs]):
-            st.markdown(f"**{definicion['nombre']}**")
-            st.code(f"{definicion['clave']} = {texto_formula(definicion)}")
-            col_ver, col_del = st.columns([1, 1])
-            with col_ver:
-                clave = definicion["clave"]
-                if clave in df.columns:
-                    validos = int(df[clave].notna().sum())
-                    st.caption(f"Puntos válidos: {validos:,}")
-            with col_del:
-                if st.button("Eliminar", key=f"delete_calc_{unidad}_{idx}", use_container_width=True):
-                    st.session_state[key_defs].pop(idx)
-                    st.rerun()
-            st.markdown("---")
+    if st.session_state[key_defs]:
+        with st.expander("Variables creadas", expanded=False):
+            for idx, definicion in enumerate(st.session_state[key_defs]):
+                st.markdown(f"**{definicion['nombre']}**")
+                st.code(f"{definicion['clave']} = {texto_formula(definicion)}")
+                col_ver, col_del = st.columns([1, 1])
+                with col_ver:
+                    clave = definicion["clave"]
+                    if clave in df.columns:
+                        validos = int(df[clave].notna().sum())
+                        st.caption(f"Puntos válidos: {validos:,}")
+                with col_del:
+                    if st.button("Eliminar", key=f"delete_calc_{unidad}_{idx}", use_container_width=True):
+                        st.session_state[key_defs].pop(idx)
+                        st.rerun()
+                st.markdown("---")
 
-st.sidebar.markdown("---")
-st.sidebar.header("Filtros")
-fecha_min = df["Fecha_y_hora"].min().date()
-fecha_max = df["Fecha_y_hora"].max().date()
 
-desde = st.sidebar.date_input("Desde", value=fecha_min, min_value=fecha_min, max_value=fecha_max)
-hasta = st.sidebar.date_input("Hasta", value=fecha_max, min_value=fecha_min, max_value=fecha_max)
+with sidebar_principal:
+    st.markdown("---")
+    st.header("Controles principales")
+    fecha_min = df["Fecha_y_hora"].min().date()
+    fecha_max = df["Fecha_y_hora"].max().date()
 
-if desde > hasta:
-    st.sidebar.error("La fecha 'Desde' no puede ser posterior a 'Hasta'.")
-    st.stop()
+    desde = st.date_input("Desde", value=fecha_min, min_value=fecha_min, max_value=fecha_max)
+    hasta = st.date_input("Hasta", value=fecha_max, min_value=fecha_min, max_value=fecha_max)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Variables a graficar")
+    if desde > hasta:
+        st.error("La fecha 'Desde' no puede ser posterior a 'Hasta'.")
+        st.stop()
 
-key_vars_grafico = f"variables_grafico_{unidad}"
-key_quitar_grafico = f"quitar_grafico_pendiente_{unidad}"
+    st.markdown("---")
+    st.subheader("Variables a graficar")
 
-if key_vars_grafico not in st.session_state:
-    st.session_state[key_vars_grafico] = [v for v in default_vars if v in todas_variables]
+    key_vars_grafico = f"variables_grafico_{unidad}"
+    key_quitar_grafico = f"quitar_grafico_pendiente_{unidad}"
 
-# Si el usuario tocó "✕" en la corrida anterior, se quita acá,
-# antes de crear el widget multiselect. Streamlit no permite modificar
-# st.session_state[key_vars_grafico] después de instanciar el widget.
-if key_quitar_grafico in st.session_state:
-    _var_a_quitar = st.session_state.pop(key_quitar_grafico)
+    if key_vars_grafico not in st.session_state:
+        st.session_state[key_vars_grafico] = [v for v in default_vars if v in todas_variables]
+
+    # Si el usuario tocó "✕" en la corrida anterior, se quita acá,
+    # antes de crear el widget multiselect. Streamlit no permite modificar
+    # st.session_state[key_vars_grafico] después de instanciar el widget.
+    if key_quitar_grafico in st.session_state:
+        _var_a_quitar = st.session_state.pop(key_quitar_grafico)
+        st.session_state[key_vars_grafico] = [
+            v for v in st.session_state[key_vars_grafico]
+            if v != _var_a_quitar
+        ]
+
+    # Evita que queden variables de otra unidad o auxiliares ya ocultas.
     st.session_state[key_vars_grafico] = [
         v for v in st.session_state[key_vars_grafico]
-        if v != _var_a_quitar
+        if v in todas_variables
     ]
 
-# Evita que queden variables de otra unidad o auxiliares ya ocultas.
-st.session_state[key_vars_grafico] = [
-    v for v in st.session_state[key_vars_grafico]
-    if v in todas_variables
-]
+    variables_sel = st.multiselect(
+        "Selecciona variables:",
+        options=todas_variables,
+        default=[],
+        format_func=lambda x: nombres_legibles[x],
+        key=key_vars_grafico,
+    )
 
-variables_sel = st.sidebar.multiselect(
-    "Selecciona variables:",
-    options=todas_variables,
-    default=[],
-    format_func=lambda x: nombres_legibles[x],
-    key=key_vars_grafico,
-)
-
-if variables_sel:
-    with st.sidebar.container(border=True):
-        st.caption("Variables seleccionadas")
-        for _var_sel in list(variables_sel):
-            col_nombre, col_quitar = st.columns([4, 1])
-            with col_nombre:
-                st.markdown(f"**{nombres_legibles[_var_sel]}**")
-            with col_quitar:
-                if st.button("✕", key=f"quitar_grafico_{unidad}_{_var_sel}", help="Quitar variable"):
-                    st.session_state[key_quitar_grafico] = _var_sel
-                    st.rerun()
+    if variables_sel:
+        with st.container(border=True):
+            st.caption("Variables seleccionadas")
+            for _var_sel in list(variables_sel):
+                col_nombre, col_quitar = st.columns([4, 1])
+                with col_nombre:
+                    st.markdown(f"**{nombres_legibles[_var_sel]}**")
+                with col_quitar:
+                    if st.button("✕", key=f"quitar_grafico_{unidad}_{_var_sel}", help="Quitar variable"):
+                        st.session_state[key_quitar_grafico] = _var_sel
+                        st.rerun()
 
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Modo de grafico")
-modo_grafico = st.sidebar.radio("Modo:", options=["Separados", "Combinados"], index=0)
+    st.markdown("---")
+    st.subheader("Modo de grafico")
+    modo_grafico = st.radio("Modo:", options=["Separados", "Combinados"], index=0)
 
-mostrar_cambios_producto = False
-if unidad.startswith("Polimer"):
-    mostrar_cambios_producto = st.sidebar.checkbox(
-        "Mostrar cambios de grado",
+    mostrar_cambios_producto = False
+    if unidad.startswith("Polimer"):
+        mostrar_cambios_producto = st.checkbox(
+            "Mostrar cambios de grado",
+            value=False,
+            help=(
+                "Dibuja una línea vertical en cada cambio de producto/campaña "
+                "a lo largo de todo el período visible."
+            ),
+        )
+
+    # Se elimina la opción rápida "Rendimiento real vs estimado".
+    # Con el modo Combinados + selección de variables + eje Y secundario, ya no hace falta.
+    grafico_rendimiento_target = False
+
+    # Configuración del eje Y secundario desde el sidebar izquierdo.
+    # No se usa panel lateral derecho para no achicar la gráfica.
+    escala_y1_manual = None
+    escala_y2_manual = None
+    variables_y2_sidebar = []
+
+    variables_para_ejes = [v for v in list(variables_sel) if v in todas_variables]
+
+    if modo_grafico == "Combinados" and len(variables_para_ejes) >= 2:
+        st.markdown("---")
+        st.subheader("Eje Y secundario")
+        variables_y2_sidebar = st.multiselect(
+            "Variables en eje derecho:",
+            options=variables_para_ejes,
+            default=variables_para_ejes[1:],
+            format_func=lambda x: nombres_legibles[x],
+            key=f"variables_y2_sidebar_{unidad}",
+            help="Las variables no seleccionadas quedan en el eje izquierdo.",
+        )
+
+        # Evitar que todas las variables queden en el eje derecho.
+        if len(variables_y2_sidebar) == len(variables_para_ejes):
+            variables_y2_sidebar = variables_y2_sidebar[1:]
+            st.caption("Se dejó al menos una variable en el eje izquierdo.")
+
+    st.markdown("---")
+    st.subheader("Escalas Y")
+
+    usar_escalas_manual = st.checkbox(
+        "Ajustar escalas Y",
         value=False,
+        help="Permite fijar manualmente los mínimos y máximos visibles de los ejes Y.",
+    )
+
+    # Contenedor fijo para los campos de escala. Se completa más adelante,
+    # cuando ya existen df_f, variables_y1 y variables_y2.
+    escala_y_sidebar_container = st.container()
+
+    st.markdown("---")
+    st.subheader("Agrupacion temporal")
+    agrupacion = st.selectbox(
+        "Frecuencia:",
+        options=["Hora", "Día", "Semana", "Mes"],
+        index=2,
+    )
+
+    st.markdown("---")
+    st.subheader("Filtros recomendados")
+    filtrar_caudales_negativos = st.checkbox(
+        "Filtros recomendados",
+        value=True,
         help=(
-            "Dibuja una línea vertical en cada cambio de producto/campaña "
-            "a lo largo de todo el período visible."
+            "Aplica filtros automaticos recomendados segun la unidad seleccionada. "
+            "En Polimerizacion usa nivel, URA, presion, MFI polvo y slurry. "
+            "En Destilacion usa presion C-1001, ingreso a splitter y presion de succion K-1001."
         ),
     )
 
-# Se elimina la opción rápida "Rendimiento real vs estimado".
-# Con el modo Combinados + selección de variables + eje Y secundario, ya no hace falta.
-grafico_rendimiento_target = False
+    if filtrar_caudales_negativos:
+        if unidad.startswith("Polimer"):
+            st.caption(
+                "Activos Polimerizacion: 60<Nivel<70; 8000<URA<13000; "
+                "30<P R-2301<31; MFI polvo>0; Slurry>50."
+            )
+        elif unidad.startswith("Destil"):
+            st.caption(
+                "Activos Destilacion: P C-1001>28; Ingreso splitter>36; "
+                "P succion K-1001>10."
+            )
 
-# Configuración del eje Y secundario desde el sidebar izquierdo.
-# No se usa panel lateral derecho para no achicar la gráfica.
-escala_y1_manual = None
-escala_y2_manual = None
-variables_y2_sidebar = []
+    st.markdown("---")
+    st.subheader("Filtros por variable")
 
-variables_para_ejes = [v for v in list(variables_sel) if v in todas_variables]
+    filtros_recomendados_vars = []
+    if filtrar_caudales_negativos:
+        if unidad.startswith("Polimer"):
+            filtros_recomendados_vars = [
+                v for v in [
+                    "Nivel_R2301",
+                    "Calor_reaccion_URA",
+                    "Presion_R2301",
+                    "MFI_polvo",
+                    "Slurry",
+                ]
+                if v in todas_variables
+            ]
+        elif unidad.startswith("Destil"):
+            filtros_recomendados_vars = [
+                v for v in [
+                    "Presion_C1001",
+                    "Ingreso_splitter",
+                    "P_succion_K1001",
+                ]
+                if v in todas_variables
+            ]
 
-if modo_grafico == "Combinados" and len(variables_para_ejes) >= 2:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Eje Y secundario")
-    variables_y2_sidebar = st.sidebar.multiselect(
-        "Variables en eje derecho:",
-        options=variables_para_ejes,
-        default=variables_para_ejes[1:],
+    # Mantiene seleccionadas las variables recomendadas cuando el tilde está activo.
+    if "vars_filtro_estado" not in st.session_state:
+        st.session_state["vars_filtro_estado"] = []
+
+    # Evita que queden variables de la otra unidad cuando se cambia Destilación/Polimerización.
+    st.session_state["vars_filtro_estado"] = [
+        v for v in st.session_state["vars_filtro_estado"]
+        if v in todas_variables
+    ]
+
+    if filtrar_caudales_negativos:
+        for _v_rec in filtros_recomendados_vars:
+            if _v_rec not in st.session_state["vars_filtro_estado"]:
+                st.session_state["vars_filtro_estado"].append(_v_rec)
+
+    vars_filtro = st.multiselect(
+        "Variables a filtrar:",
+        options=todas_variables,
+        default=[],
         format_func=lambda x: nombres_legibles[x],
-        key=f"variables_y2_sidebar_{unidad}",
-        help="Las variables no seleccionadas quedan en el eje izquierdo.",
+        key="vars_filtro_estado",
     )
 
-    # Evitar que todas las variables queden en el eje derecho.
-    if len(variables_y2_sidebar) == len(variables_para_ejes):
-        variables_y2_sidebar = variables_y2_sidebar[1:]
-        st.sidebar.caption("Se dejó al menos una variable en el eje izquierdo.")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Escalas Y")
 
-usar_escalas_manual = st.sidebar.checkbox(
-    "Ajustar escalas Y",
-    value=False,
-    help="Permite fijar manualmente los mínimos y máximos visibles de los ejes Y.",
-)
+    # ==============================================================================
+    # FILTRO POR PRODUCTO / CAMPAÑA
+    # ==============================================================================
+    productos_sel = []
 
-# Contenedor fijo para los campos de escala. Se completa más adelante,
-# cuando ya existen df_f, variables_y1 y variables_y2.
-escala_y_sidebar_container = st.sidebar.container()
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Agrupacion temporal")
-agrupacion = st.sidebar.selectbox(
-    "Frecuencia:",
-    options=["Hora", "Día", "Semana", "Mes"],
-    index=2,
-)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Limpieza de datos")
-filtrar_caudales_negativos = st.sidebar.checkbox(
-    "Filtros recomendados",
-    value=True,
-    help=(
-        "Aplica filtros automaticos recomendados segun la unidad seleccionada. "
-        "En Polimerizacion usa nivel, URA, presion, MFI polvo y slurry. "
-        "En Destilacion usa presion C-1001, ingreso a splitter y presion de succion K-1001."
-    ),
-)
-
-if filtrar_caudales_negativos:
     if unidad.startswith("Polimer"):
-        st.sidebar.caption(
-            "Activos Polimerizacion: 60<Nivel<70; 8000<URA<13000; "
-            "30<P R-2301<31; MFI polvo>0; Slurry>50."
-        )
-    elif unidad.startswith("Destil"):
-        st.sidebar.caption(
-            "Activos Destilacion: P C-1001>28; Ingreso splitter>36; "
-            "P succion K-1001>10."
-        )
+        st.markdown("---")
+        st.subheader("Filtro por producto")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Filtros por variable")
-
-filtros_recomendados_vars = []
-if filtrar_caudales_negativos:
-    if unidad.startswith("Polimer"):
-        filtros_recomendados_vars = [
-            v for v in [
-                "Nivel_R2301",
-                "Calor_reaccion_URA",
-                "Presion_R2301",
-                "MFI_polvo",
-                "Slurry",
-            ]
-            if v in todas_variables
-        ]
-    elif unidad.startswith("Destil"):
-        filtros_recomendados_vars = [
-            v for v in [
-                "Presion_C1001",
-                "Ingreso_splitter",
-                "P_succion_K1001",
-            ]
-            if v in todas_variables
-        ]
-
-# Mantiene seleccionadas las variables recomendadas cuando el tilde está activo.
-if "vars_filtro_estado" not in st.session_state:
-    st.session_state["vars_filtro_estado"] = []
-
-# Evita que queden variables de la otra unidad cuando se cambia Destilación/Polimerización.
-st.session_state["vars_filtro_estado"] = [
-    v for v in st.session_state["vars_filtro_estado"]
-    if v in todas_variables
-]
-
-if filtrar_caudales_negativos:
-    for _v_rec in filtros_recomendados_vars:
-        if _v_rec not in st.session_state["vars_filtro_estado"]:
-            st.session_state["vars_filtro_estado"].append(_v_rec)
-
-vars_filtro = st.sidebar.multiselect(
-    "Variables a filtrar:",
-    options=todas_variables,
-    default=[],
-    format_func=lambda x: nombres_legibles[x],
-    key="vars_filtro_estado",
-)
-
-
-
-# ==============================================================================
-# FILTRO POR PRODUCTO / CAMPAÑA
-# ==============================================================================
-productos_sel = []
-
-if unidad.startswith("Polimer"):
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Filtro por producto")
-
-    if "Producto" in df.columns:
-        serie_producto = (
-            df["Producto"]
-            .astype("string")
-            .str.strip()
-            .replace({
-                "": pd.NA,
-                "nan": pd.NA,
-                "None": pd.NA,
-                "NONE": pd.NA,
-                "NaN": pd.NA,
-                "<NA>": pd.NA,
-                "0": pd.NA,
-                "0.0": pd.NA,
-            })
-        )
-
-        df["Producto"] = serie_producto.map(normalizar_producto_operativo)
-
-        productos_disponibles = sorted([
-            str(p).strip()
-            for p in df["Producto"].dropna().unique()
-            if str(p).strip()
-        ])
-
-        if productos_disponibles:
-            st.sidebar.caption(f"Productos detectados: {len(productos_disponibles)}")
-
-            productos_sel = st.sidebar.multiselect(
-                "Producto:",
-                options=productos_disponibles,
-                default=[],
-                help=(
-                    "Sin selección = todos los productos. Si seleccionás uno o más, "
-                    "la app filtra las campañas antes de agrupar y calcular el target."
-                ),
+        if "Producto" in df.columns:
+            serie_producto = (
+                df["Producto"]
+                .astype("string")
+                .str.strip()
+                .replace({
+                    "": pd.NA,
+                    "nan": pd.NA,
+                    "None": pd.NA,
+                    "NONE": pd.NA,
+                    "NaN": pd.NA,
+                    "<NA>": pd.NA,
+                    "0": pd.NA,
+                    "0.0": pd.NA,
+                })
             )
 
-            if productos_sel:
-                df = df[df["Producto"].astype(str).isin(productos_sel)].copy()
-                st.sidebar.caption(f"Productos seleccionados: {len(productos_sel)}")
+            df["Producto"] = serie_producto.map(normalizar_producto_operativo)
+
+            productos_disponibles = sorted([
+                str(p).strip()
+                for p in df["Producto"].dropna().unique()
+                if str(p).strip()
+            ])
+
+            if productos_disponibles:
+                st.caption(f"Productos detectados: {len(productos_disponibles)}")
+
+                productos_sel = st.multiselect(
+                    "Producto:",
+                    options=productos_disponibles,
+                    default=[],
+                    help=(
+                        "Sin selección = todos los productos. Si seleccionás uno o más, "
+                        "la app filtra las campañas antes de agrupar y calcular el target."
+                    ),
+                )
+
+                if productos_sel:
+                    df = df[df["Producto"].astype(str).isin(productos_sel)].copy()
+                    st.caption(f"Productos seleccionados: {len(productos_sel)}")
+                else:
+                    st.caption("Sin selección: se incluyen todos los productos.")
             else:
-                st.sidebar.caption("Sin selección: se incluyen todos los productos.")
+                st.warning(
+                    "La columna PRODUCTO fue encontrada, pero no se detectaron valores no vacíos. "
+                    "Verificá que el Excel cargado tenga productos escritos en la hoja POLIMERIZACIÓN."
+                )
         else:
-            st.sidebar.warning(
-                "La columna PRODUCTO fue encontrada, pero no se detectaron valores no vacíos. "
-                "Verificá que el Excel cargado tenga productos escritos en la hoja POLIMERIZACIÓN."
+            st.warning(
+                "No se encontró la columna PRODUCTO. Cargá el Excel actualizado con la nueva columna PRODUCTO."
             )
-    else:
-        st.sidebar.warning(
-            "No se encontró la columna PRODUCTO. Cargá el Excel actualizado con la nueva columna PRODUCTO."
-        )
+
 
 
 # ==============================================================================
@@ -1420,29 +1438,25 @@ filtro_producto_activo = unidad.startswith("Polimer") and len(productos_sel) > 0
 
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
-# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR CONDICION DE REACTOR
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR CORRELACION DE PROCESO
 #
-# Cambio de criterio:
-# - Se elimina PRODUCTO / grado pellet de la estimación.
-# - También se excluye MFI_pellets, porque es una medición/identificación posterior
-#   al extrusor y puede distorsionar transiciones como SMD.
+# Criterio actual:
+# - NO usa PRODUCTO / grado pellet.
+# - NO usa MFI_pellets.
+# - Entrena una correlación de referencia con un período confiable fijo:
+#     01/12/2025 a 28/02/2026
+# - Variables de correlación:
+#     Conc_H2
+#     Conc_propano
+#     Slurry
+#     Relación TEA/C-Donor
+#     Temperatura_R2301
+#     Sin_C_Donor
 #
-# El rendimiento estimado se calcula por similitud de condición del reactor,
-# usando exclusivamente variables de polvo/proceso:
-#   - MFI_polvo
-#   - XS
-#   - Conc_H2
-#   - Conc_propano
-#   - Slurry
-#   - C_Donor
-#   - C_Donor_activo
-#
-# C_Donor es crítico porque grados como KFM suelen operar sin donor,
-# y eso eleva el rendimiento. Se considera tanto el caudal continuo
-# como una bandera binaria donor activo / sin donor.
-#
-# La columna PRODUCTO se mantiene para filtrar/graficar campañas, pero NO entra
-# en la ecuación del rendimiento estimado.
+# Nota importante:
+# La relación TEA/C-Donor no está definida cuando C-Donor = 0. Para capturar
+# correctamente campañas sin donor, como KFM, se agrega la variable binaria
+# Sin_C_Donor. El grado se mantiene solo para filtro/visualización.
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
     for col in [
@@ -1453,57 +1467,77 @@ if unidad.startswith("Polimer") and all(
     ]
 ):
     _fecha = pd.to_datetime(df_agrup["Fecha_y_hora"], errors="coerce")
-
-    _base_2024 = (
-        (_fecha >= pd.Timestamp("2024-04-28"))
-        & (_fecha <= pd.Timestamp("2024-10-06 23:59:59"))
-    )
-
-    _base_2025 = (
-        (_fecha >= pd.Timestamp("2025-05-01"))
-        & (_fecha <= pd.Timestamp("2025-12-31 23:59:59"))
-    )
-
-    _periodo_excluido = (
-        (_fecha >= pd.Timestamp("2024-11-01"))
-        & (_fecha <= pd.Timestamp("2025-04-30 23:59:59"))
-    )
-
-    _periodo_base = (_base_2024 | _base_2025) & (~_periodo_excluido)
-
+    _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
     _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
+
+    # Período confiable solicitado para entrenar el modelo.
+    _periodo_base_modelo = (
+        (_fecha >= pd.Timestamp("2025-12-01"))
+        & (_fecha <= pd.Timestamp("2026-02-28 23:59:59"))
+    )
+
     _presion_ok = (_presion > 30.0) & (_presion < 31.0)
 
-    _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
-
-    # C-Donor: considerar explícitamente el modo sin donor.
-    # Para KFM y otros grados sin donor, el caudal puede ser cero o casi cero.
-    # No se filtra C_Donor > 0 porque el cero es una condición operativa válida.
+    # ----------------------------------------------------------------------
+    # Variables derivadas para el modelo
+    # ----------------------------------------------------------------------
+    # Sin_C_Donor captura explícitamente campañas sin donor.
     if "C_Donor" in df_agrup.columns:
         _cdonor_num = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
-        df_agrup["C_Donor_activo"] = np.where(
-            _cdonor_num.fillna(0.0) > 0.001,
+        df_agrup["Sin_C_Donor_modelo"] = np.where(
+            _cdonor_num.fillna(0.0) <= 0.001,
             1.0,
             0.0,
         )
+    else:
+        df_agrup["Sin_C_Donor_modelo"] = np.nan
 
-    # Variables de estimación solicitadas.
-    # No usar PRODUCTO ni MFI_pellets.
+    # Relación TEA/C-Donor:
+    # - Se toma la columna Excel si existe.
+    # - Si no existe, se calcula como TEA/C_Donor.
+    # - Cuando no hay donor, se fija en 0 y la condición queda representada
+    #   por Sin_C_Donor_modelo.
+    _rel_excel = None
+    if "Rel_TEA_CDonor" in df_agrup.columns:
+        _rel_excel = pd.to_numeric(df_agrup["Rel_TEA_CDonor"], errors="coerce")
+
+    _rel_calc = None
+    if all(c in df_agrup.columns for c in ["TEA", "C_Donor"]):
+        _tea = pd.to_numeric(df_agrup["TEA"], errors="coerce")
+        _cdonor = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
+        _rel_calc = (_tea / _cdonor.where(_cdonor.abs() > 0.001)).replace([np.inf, -np.inf], np.nan)
+
+    if _rel_excel is not None and _rel_calc is not None:
+        _rel = _rel_excel.fillna(_rel_calc)
+    elif _rel_excel is not None:
+        _rel = _rel_excel
+    elif _rel_calc is not None:
+        _rel = _rel_calc
+    else:
+        _rel = pd.Series(np.nan, index=df_agrup.index)
+
+    df_agrup["Rel_TEA_CDonor_modelo"] = _rel.fillna(0.0)
+
+    # Features pedidas para la correlación.
     _features_candidatas = [
-        "MFI_polvo",
-        "XS",
         "Conc_H2",
         "Conc_propano",
         "Slurry",
-        "C_Donor",
-        "C_Donor_activo",
+        "Rel_TEA_CDonor_modelo",
+        "Temperatura_R2301",
+        "Sin_C_Donor_modelo",
     ]
 
     _features = []
     for _f in _features_candidatas:
         if _f in df_agrup.columns:
             _serie = pd.to_numeric(df_agrup[_f], errors="coerce")
-            if _serie.notna().sum() >= 5:
+            # Sin_C_Donor_modelo puede ser todo 0 si en el período no hubo campañas sin donor;
+            # igual se permite si existe, porque es clave para extrapolar KFM.
+            if _f == "Sin_C_Donor_modelo":
+                if _serie.notna().sum() >= 3:
+                    _features.append(_f)
+            elif _serie.notna().sum() >= 5:
                 _features.append(_f)
 
     _estimado = np.full(len(df_agrup), np.nan)
@@ -1512,233 +1546,265 @@ if unidad.startswith("Polimer") and all(
     _dist_min = np.full(len(df_agrup), np.nan)
     _target_flag = np.zeros(len(df_agrup))
 
-    if len(_features) > 0:
-        # Filtro de calidad para construir la base confiable.
-        _calidad_base = (
-            _periodo_base
+    if len(_features) >= 3:
+        # Base confiable de entrenamiento: período dic-25 a feb-26.
+        _base_mask = (
+            _periodo_base_modelo
             & _presion_ok
             & _rendimiento.notna()
         )
 
-        # Mantener criterios de operación normal, pero sin usar PRODUCTO.
+        # Filtros operativos recomendados si existen.
         if "Nivel_R2301" in df_agrup.columns:
             _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
-            _calidad_base = _calidad_base & (_nivel > 60.0) & (_nivel < 70.0)
+            _base_mask = _base_mask & (_nivel > 60.0) & (_nivel < 70.0)
 
         if "Calor_reaccion_URA" in df_agrup.columns:
             _ura = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
-            _calidad_base = _calidad_base & (_ura > 8000.0) & (_ura < 13000.0)
+            _base_mask = _base_mask & (_ura > 8000.0) & (_ura < 13000.0)
 
-        # Reglas mínimas para evitar valores nulos/cero de laboratorio o analizador.
-        if "MFI_polvo" in _features:
-            _mfi_polvo = pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce")
-            _calidad_base = _calidad_base & (_mfi_polvo > 0.0)
-
+        # Condiciones mínimas de validez para las variables principales.
         if "Slurry" in _features:
-            _slurry = pd.to_numeric(df_agrup["Slurry"], errors="coerce")
-            _calidad_base = _calidad_base & (_slurry > 50.0)
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Slurry"], errors="coerce") > 50.0)
 
         if "Conc_propano" in _features:
-            _propano = pd.to_numeric(df_agrup["Conc_propano"], errors="coerce")
-            _calidad_base = _calidad_base & (_propano > 0.0)
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Conc_propano"], errors="coerce") > 0.0)
 
         if "Conc_H2" in _features:
-            _h2 = pd.to_numeric(df_agrup["Conc_H2"], errors="coerce")
-            _calidad_base = _calidad_base & (_h2 > 0.0)
-
-        if "XS" in _features:
-            _xs = pd.to_numeric(df_agrup["XS"], errors="coerce")
-            _calidad_base = _calidad_base & (_xs >= 0.0)
-
-        if "C_Donor" in _features:
-            _cdonor = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
-            # No exigir C_Donor > 0: sin donor es una condición real.
-            _calidad_base = _calidad_base & (_cdonor >= 0.0)
-
-        # Pedir que existan las variables de estimación disponibles.
-        for _f in _features:
-            _calidad_base = _calidad_base & pd.to_numeric(
-                df_agrup[_f],
-                errors="coerce",
-            ).notna()
-
-        _base_confiable = df_agrup.loc[_calidad_base].copy()
-
-        # Respaldo: fuera del evento excluido y con presión normal.
-        # Se usa si la base principal queda demasiado chica.
-        _base_respaldo_mask = (
-            _presion_ok
-            & _rendimiento.notna()
-            & (~_periodo_excluido)
-        )
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Conc_H2"], errors="coerce") > 0.0)
 
         for _f in _features:
-            _base_respaldo_mask = _base_respaldo_mask & pd.to_numeric(
-                df_agrup[_f],
-                errors="coerce",
-            ).notna()
+            _base_mask = _base_mask & pd.to_numeric(df_agrup[_f], errors="coerce").notna()
 
-        _base_respaldo = df_agrup.loc[_base_respaldo_mask].copy()
+        _base_modelo = df_agrup.loc[_base_mask].copy()
 
-        if len(_base_confiable) < 10 and len(_base_respaldo) > len(_base_confiable):
-            _base_confiable = _base_respaldo.copy()
-
-        if len(_base_confiable) > 0:
-            _base_confiable["Percentil_rendimiento_base"] = (
-                _base_confiable["Rendimiento"].rank(pct=True) * 100.0
+        # Si el filtro operativo estricto deja muy pocos puntos, se relaja nivel/URA
+        # pero se mantiene el período dic-25 a feb-26 y presión normal.
+        if len(_base_modelo) < max(8, len(_features) + 2):
+            _base_mask_relajado = (
+                _periodo_base_modelo
+                & _presion_ok
+                & _rendimiento.notna()
             )
-
-            _idx_base = _base_confiable.index.intersection(df_agrup.index)
-            _percentil_base[df_agrup.index.get_indexer(_idx_base)] = _base_confiable.loc[
-                _idx_base,
-                "Percentil_rendimiento_base",
-            ].to_numpy(dtype=float)
-
-        if len(_base_confiable) >= 3:
-            _x_pool = _base_confiable[_features].copy()
 
             for _f in _features:
-                _x_pool[_f] = pd.to_numeric(_x_pool[_f], errors="coerce")
+                _base_mask_relajado = _base_mask_relajado & pd.to_numeric(
+                    df_agrup[_f],
+                    errors="coerce",
+                ).notna()
 
-            _y_pool = pd.to_numeric(
-                _base_confiable["Rendimiento"],
-                errors="coerce",
-            )
+            _base_modelo = df_agrup.loc[_base_mask_relajado].copy()
 
-            _ok_pool = _x_pool.notna().all(axis=1) & _y_pool.notna()
-            _x_pool = _x_pool.loc[_ok_pool]
-            _y_pool = _y_pool.loc[_ok_pool]
-            _idx_pool = _x_pool.index.to_numpy()
+        if len(_base_modelo) >= max(6, len(_features) + 1):
+            _x_base = _base_modelo[_features].copy()
 
-            if len(_y_pool) >= 3:
-                _med = _x_pool.median(axis=0, skipna=True)
-                _q75 = _x_pool.quantile(0.75)
-                _q25 = _x_pool.quantile(0.25)
+            for _f in _features:
+                _x_base[_f] = pd.to_numeric(_x_base[_f], errors="coerce")
 
+            _y_base = pd.to_numeric(_base_modelo["Rendimiento"], errors="coerce")
+            _ok = _x_base.notna().all(axis=1) & _y_base.notna()
+
+            _x_base = _x_base.loc[_ok]
+            _y_base = _y_base.loc[_ok]
+            _idx_base = _x_base.index.to_numpy()
+
+            if len(_y_base) >= max(6, len(_features) + 1):
+                _med = _x_base.median(axis=0, skipna=True)
+                _q75 = _x_base.quantile(0.75)
+                _q25 = _x_base.quantile(0.25)
                 _escala = (_q75 - _q25).replace(0, np.nan)
-                _escala = _escala.fillna(_x_pool.std(axis=0, skipna=True))
+                _escala = _escala.fillna(_x_base.std(axis=0, skipna=True))
                 _escala = _escala.replace(0, 1.0).fillna(1.0)
 
+                _x_np = _x_base.to_numpy(dtype=float)
+                _y_np = _y_base.to_numpy(dtype=float)
+
+                _med_np = _med.to_numpy(dtype=float)
+                _escala_np = _escala.to_numpy(dtype=float)
+
+                # Pesos de variables para que la correlación priorice las más críticas.
                 _pesos = []
                 for _f in _features:
-                    if _f == "C_Donor_activo":
-                        # Muy importante para separar campañas sin donor, como KFM.
+                    if _f == "Sin_C_Donor_modelo":
                         _pesos.append(5.0)
-                    elif _f == "C_Donor":
-                        _pesos.append(4.2)
-                    elif _f == "MFI_polvo":
-                        _pesos.append(3.2)
+                    elif _f == "Rel_TEA_CDonor_modelo":
+                        _pesos.append(4.5)
                     elif _f == "Conc_propano":
-                        _pesos.append(3.2)
+                        _pesos.append(3.5)
                     elif _f == "Conc_H2":
-                        _pesos.append(3.0)
-                    elif _f == "XS":
-                        _pesos.append(2.6)
+                        _pesos.append(3.2)
                     elif _f == "Slurry":
-                        _pesos.append(2.2)
+                        _pesos.append(3.0)
+                    elif _f == "Temperatura_R2301":
+                        _pesos.append(2.7)
                     else:
                         _pesos.append(1.0)
 
                 _pesos = np.array(_pesos, dtype=float)
-                _med_np = _med.to_numpy(dtype=float)
-                _escala_np = _escala.to_numpy(dtype=float)
 
-                _x_train = _x_pool.to_numpy(dtype=float)
-                _y_train = _y_pool.to_numpy(dtype=float)
+                _x_std = ((_x_np - _med_np) / _escala_np) * np.sqrt(_pesos)
 
-                _x_train_s = ((_x_train - _med_np) / _escala_np) * np.sqrt(_pesos)
+                # Modelo de correlación: ridge lineal con variables estandarizadas.
+                # Se evita sklearn para mantener requirements liviano.
+                _x_design = np.column_stack([np.ones(len(_x_std)), _x_std])
+                _lambda = 0.15
+                _ridge = np.eye(_x_design.shape[1]) * _lambda
+                _ridge[0, 0] = 0.0  # no penalizar intercepto
 
-                _x_actual_df = df_agrup[_features].copy()
+                _beta_entrenada = np.linalg.pinv(
+                    _x_design.T @ _x_design + _ridge
+                ) @ _x_design.T @ _y_np
+
+                _beta = _beta_entrenada.copy()
+
+                # Ecuación editable por el usuario.
+                # Coeficientes aplicados sobre variables estandarizadas:
+                # z_i = (variable_i - mediana_i) / escala_i * sqrt(peso_i)
+                with sidebar_modelo:
+                    st.markdown("---")
+                    st.subheader("Modelo rendimiento estimado")
+
+                    with st.expander("Ecuación editable", expanded=False):
+                        st.caption(
+                            "Modelo lineal entrenado con dic-25 a feb-26. "
+                            "Los coeficientes se aplican sobre variables estandarizadas."
+                        )
+
+                        _feature_labels_modelo = {
+                            "Conc_H2": "Concentración H2",
+                            "Conc_propano": "Concentración propano",
+                            "Slurry": "Slurry",
+                            "Rel_TEA_CDonor_modelo": "Relación TEA/C-Donor",
+                            "Temperatura_R2301": "Temperatura R-2301",
+                            "Sin_C_Donor_modelo": "Sin C-Donor",
+                        }
+
+                        _modelo_key = re.sub(r"[^A-Za-z0-9_]+", "_", "_".join(_features))
+
+                        _b_editados = []
+
+                        _col_b0_a, _col_b0_b = st.columns([1, 1])
+                        with _col_b0_a:
+                            _b0_edit = st.number_input(
+                                "b0",
+                                value=float(_beta_entrenada[0]),
+                                step=0.10,
+                                format="%.6f",
+                                key=f"coef_b0_{_modelo_key}",
+                            )
+                        with _col_b0_b:
+                            st.caption("Intercepto")
+
+                        _b_editados.append(float(_b0_edit))
+
+                        for _idx_coef, _feature_coef in enumerate(_features, start=1):
+                            _label_coef = _feature_labels_modelo.get(
+                                _feature_coef,
+                                nombres_legibles.get(_feature_coef, _feature_coef),
+                            )
+
+                            _col_coef_a, _col_coef_b = st.columns([1, 1])
+                            with _col_coef_a:
+                                _b_i = st.number_input(
+                                    f"b{_idx_coef}",
+                                    value=float(_beta_entrenada[_idx_coef]),
+                                    step=0.10,
+                                    format="%.6f",
+                                    key=f"coef_{_modelo_key}_{_feature_coef}",
+                                )
+                            with _col_coef_b:
+                                st.caption(_label_coef)
+
+                            _b_editados.append(float(_b_i))
+
+                        _beta = np.array(_b_editados, dtype=float)
+
+                        _terminos_eq = [f"{_beta[0]:.3f}"]
+                        for _idx_coef, _feature_coef in enumerate(_features, start=1):
+                            _label_coef = _feature_labels_modelo.get(
+                                _feature_coef,
+                                nombres_legibles.get(_feature_coef, _feature_coef),
+                            )
+                            _terminos_eq.append(
+                                f"{_beta[_idx_coef]:+.3f}·z({_label_coef})"
+                            )
+
+                        st.code(
+                            "Rendimiento estimado = " + " ".join(_terminos_eq),
+                            language="text",
+                        )
+
+                        st.caption(
+                            "z(variable) usa mediana, escala robusta y peso interno del período base. "
+                            "Si cambiás un coeficiente, la curva estimada se recalcula automáticamente."
+                        )
+
+                # R2 de entrenamiento para confiabilidad general.
+                _y_fit = _x_design @ _beta
+                _ss_res = float(np.nansum((_y_np - _y_fit) ** 2))
+                _ss_tot = float(np.nansum((_y_np - np.nanmean(_y_np)) ** 2))
+
+                if _ss_tot > 0:
+                    _r2 = max(0.0, min(1.0, 1.0 - _ss_res / _ss_tot))
+                else:
+                    _r2 = 0.0
+
+                # Percentil dentro de la base usada.
+                _base_modelo.loc[_x_base.index, "Percentil_rendimiento_base"] = (
+                    pd.Series(_y_np, index=_x_base.index).rank(pct=True) * 100.0
+                )
+                _idx_base_valid = _x_base.index.intersection(df_agrup.index)
+                _percentil_base[df_agrup.index.get_indexer(_idx_base_valid)] = _base_modelo.loc[
+                    _idx_base_valid,
+                    "Percentil_rendimiento_base",
+                ].to_numpy(dtype=float)
+
+                # Aplicar el modelo a todo el rango donde existan las variables.
+                _x_all = df_agrup[_features].copy()
 
                 for _f in _features:
-                    _x_actual_df[_f] = pd.to_numeric(_x_actual_df[_f], errors="coerce")
+                    _x_all[_f] = pd.to_numeric(_x_all[_f], errors="coerce")
 
-                _valid_actual = _x_actual_df.notna().all(axis=1)
-                _idx_actuales = df_agrup.index[_valid_actual].to_numpy()
-                _x_actual = _x_actual_df.loc[_valid_actual].to_numpy(dtype=float)
+                _valid_all = _x_all.notna().all(axis=1)
+                _idx_all = df_agrup.index[_valid_all].to_numpy()
 
-                _bloque = 500
-                _n_train = len(_y_train)
-                _k = min(max(8, _n_train // 4), 24, _n_train)
+                if len(_idx_all) > 0:
+                    _x_all_np = _x_all.loc[_valid_all].to_numpy(dtype=float)
+                    _x_all_std = ((_x_all_np - _med_np) / _escala_np) * np.sqrt(_pesos)
+                    _x_all_design = np.column_stack([np.ones(len(_x_all_std)), _x_all_std])
 
-                for _i0 in range(0, len(_idx_actuales), _bloque):
-                    _idx_chunk = _idx_actuales[_i0:_i0 + _bloque]
-                    _x_chunk = _x_actual[_i0:_i0 + _bloque]
-                    _x_chunk_s = ((_x_chunk - _med_np) / _escala_np) * np.sqrt(_pesos)
+                    _pred = _x_all_design @ _beta
 
+                    # Evitar extrapolaciones absurdas: permitir margen alrededor
+                    # del rango de la base, pero no valores físicamente irreales.
+                    _y_min = float(np.nanmin(_y_np))
+                    _y_max = float(np.nanmax(_y_np))
+                    _margen_y = max((_y_max - _y_min) * 0.60, 2.0)
+                    _pred = np.clip(_pred, _y_min - _margen_y, _y_max + _margen_y)
+
+                    # Distancia a la nube base para confiabilidad.
                     _dist = (
-                        (_x_chunk_s[:, None, :] - _x_train_s[None, :, :]) ** 2
+                        (_x_all_std[:, None, :] - _x_std[None, :, :]) ** 2
                     ).sum(axis=2)
+                    _distancia_min = np.nanmin(_dist, axis=1)
 
-                    # Evitar autoestimación si el punto está en la base.
-                    for _j, _idx_val in enumerate(_idx_chunk):
-                        _mismo_idx = np.where(_idx_pool == _idx_val)[0]
-                        if len(_mismo_idx) > 0 and _dist.shape[1] > 1:
-                            _dist[_j, _mismo_idx] = np.inf
+                    _pos_all = df_agrup.index.get_indexer(_idx_all)
+                    _estimado[_pos_all] = _pred
+                    _dist_min[_pos_all] = _distancia_min
 
-                    _orden = np.argsort(_dist, axis=1)[:, :_k]
-                    _dist_k = np.take_along_axis(_dist, _orden, axis=1)
-                    _y_k = _y_train[_orden]
+                    _conf_dist = 100.0 * np.exp(-_distancia_min / max(len(_features), 1))
+                    _conf_r2 = 35.0 + 65.0 * _r2
+                    _conf_modelo = np.minimum(_conf_r2, _conf_dist + 25.0)
 
-                    _estimados_chunk = []
-                    _dist_min_chunk = []
+                    # Penalizar puntos fuera de presión normal.
+                    _pres_ok_all = _presion_ok.loc[_idx_all].to_numpy()
+                    _conf_modelo = np.where(_pres_ok_all, _conf_modelo, _conf_modelo * 0.4)
 
-                    for _fila in range(_y_k.shape[0]):
-                        _valid_nn = np.isfinite(_dist_k[_fila]) & np.isfinite(_y_k[_fila])
+                    _conf[_pos_all] = _conf_modelo
 
-                        if not np.any(_valid_nn):
-                            _estimados_chunk.append(np.nan)
-                            _dist_min_chunk.append(np.nan)
-                            continue
-
-                        _dist_vec = _dist_k[_fila, _valid_nn]
-                        _y_vec = _y_k[_fila, _valid_nn]
-
-                        # Referencia de buen desempeño para condiciones similares:
-                        # promedio ponderado del bloque superior local.
-                        if len(_y_vec) >= 8:
-                            _umbral_local = np.quantile(_y_vec, 0.60)
-                        elif len(_y_vec) >= 4:
-                            _umbral_local = np.quantile(_y_vec, 0.50)
-                        else:
-                            _umbral_local = np.nanmedian(_y_vec)
-
-                        _sel = _y_vec >= _umbral_local
-
-                        if not np.any(_sel):
-                            _sel = np.ones(len(_y_vec), dtype=bool)
-
-                        _w = 1.0 / (_dist_vec[_sel] + 0.10)
-
-                        if np.sum(_w) <= 0 or not np.isfinite(np.sum(_w)):
-                            _estimado_local = float(np.nanmean(_y_vec[_sel]))
-                        else:
-                            _estimado_local = float(np.sum(_w * _y_vec[_sel]) / np.sum(_w))
-
-                        _estimados_chunk.append(_estimado_local)
-                        _dist_min_chunk.append(float(np.nanmin(_dist_vec)))
-
-                    _pos_chunk = df_agrup.index.get_indexer(_idx_chunk)
-                    _estimado[_pos_chunk] = np.array(_estimados_chunk, dtype=float)
-                    _dist_min[_pos_chunk] = np.array(_dist_min_chunk, dtype=float)
-
-                    _d = np.array(_dist_min_chunk, dtype=float)
-                    _conf_dist = 100.0 * np.exp(-_d / max(len(_features), 1))
-                    _conf_dist = np.where(np.isfinite(_conf_dist), _conf_dist, 0.0)
-
-                    _conf_base = min(100.0, 30.0 + 8.0 * len(_features) + 0.8 * _n_train)
-                    _conf_final = np.minimum(_conf_base, _conf_dist + 25.0)
-
-                    _pres_ok_chunk = _presion_ok.loc[_idx_chunk].to_numpy()
-                    _conf_final = np.where(_pres_ok_chunk, _conf_final, _conf_final * 0.4)
-
-                    _conf[_pos_chunk] = _conf_final
-
-                # Marcar puntos de la base que pertenecen al bloque superior global.
-                _umbral_top = np.nanquantile(_y_train, 0.90)
-                _idx_top = _idx_pool[_y_train >= _umbral_top]
-                _pos_top = df_agrup.index.get_indexer(_idx_top)
-                _target_flag[_pos_top] = 1.0
+                # Marcar el período usado como base.
+                _pos_train = df_agrup.index.get_indexer(_idx_base)
+                _target_flag[_pos_train] = 1.0
 
     df_agrup["Productividad_estimada"] = pd.Series(_estimado, index=df_agrup.index)
     df_agrup["Rendimiento_esperado_producto"] = pd.Series(_estimado, index=df_agrup.index)
@@ -1763,7 +1829,7 @@ if unidad.startswith("Polimer") and all(
         df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
 
     if "Periodo_base_productividad_2024" in df_agrup.columns:
-        df_agrup["Periodo_base_productividad_2024"] = np.where(_periodo_base, 1.0, 0.0)
+        df_agrup["Periodo_base_productividad_2024"] = np.where(_periodo_base_modelo, 1.0, 0.0)
 
 
 # Mascara inicial: rango de fechas
