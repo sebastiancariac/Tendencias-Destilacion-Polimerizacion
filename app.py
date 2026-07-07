@@ -1056,7 +1056,7 @@ if unidad.startswith("Polimer") and all(
     variables_productividad = {
         "Productividad_estimada": "Rendimiento estimado",
         "Desvio_vs_productividad_estimada": "Desvio vs rendimiento estimado [Real - Estimado]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad estimacion por condicion reactor [%]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad estimacion por condicion reactor + C-Donor [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1434,6 +1434,12 @@ df_agrup = aplicar_agrupacion(df, agrupacion)
 #   - Conc_H2
 #   - Conc_propano
 #   - Slurry
+#   - C_Donor
+#   - C_Donor_activo
+#
+# C_Donor es crítico porque grados como KFM suelen operar sin donor,
+# y eso eleva el rendimiento. Se considera tanto el caudal continuo
+# como una bandera binaria donor activo / sin donor.
 #
 # La columna PRODUCTO se mantiene para filtrar/graficar campañas, pero NO entra
 # en la ecuación del rendimiento estimado.
@@ -1470,6 +1476,17 @@ if unidad.startswith("Polimer") and all(
 
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
 
+    # C-Donor: considerar explícitamente el modo sin donor.
+    # Para KFM y otros grados sin donor, el caudal puede ser cero o casi cero.
+    # No se filtra C_Donor > 0 porque el cero es una condición operativa válida.
+    if "C_Donor" in df_agrup.columns:
+        _cdonor_num = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
+        df_agrup["C_Donor_activo"] = np.where(
+            _cdonor_num.fillna(0.0) > 0.001,
+            1.0,
+            0.0,
+        )
+
     # Variables de estimación solicitadas.
     # No usar PRODUCTO ni MFI_pellets.
     _features_candidatas = [
@@ -1478,6 +1495,8 @@ if unidad.startswith("Polimer") and all(
         "Conc_H2",
         "Conc_propano",
         "Slurry",
+        "C_Donor",
+        "C_Donor_activo",
     ]
 
     _features = []
@@ -1530,6 +1549,11 @@ if unidad.startswith("Polimer") and all(
         if "XS" in _features:
             _xs = pd.to_numeric(df_agrup["XS"], errors="coerce")
             _calidad_base = _calidad_base & (_xs >= 0.0)
+
+        if "C_Donor" in _features:
+            _cdonor = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
+            # No exigir C_Donor > 0: sin donor es una condición real.
+            _calidad_base = _calidad_base & (_cdonor >= 0.0)
 
         # Pedir que existan las variables de estimación disponibles.
         for _f in _features:
@@ -1597,7 +1621,12 @@ if unidad.startswith("Polimer") and all(
 
                 _pesos = []
                 for _f in _features:
-                    if _f == "MFI_polvo":
+                    if _f == "C_Donor_activo":
+                        # Muy importante para separar campañas sin donor, como KFM.
+                        _pesos.append(5.0)
+                    elif _f == "C_Donor":
+                        _pesos.append(4.2)
+                    elif _f == "MFI_polvo":
                         _pesos.append(3.2)
                     elif _f == "Conc_propano":
                         _pesos.append(3.2)
