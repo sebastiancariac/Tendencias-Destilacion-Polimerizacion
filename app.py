@@ -1646,6 +1646,123 @@ if unidad.startswith("Polimer") and all(
 
                 _x_std = ((_x_np - _med_np) / _escala_np) * np.sqrt(_pesos)
 
+                # Diagnóstico de representatividad del período base.
+                _n_base_modelo = int(len(_y_np))
+                _n_sin_donor_base = 0
+                _n_sin_donor_hist = 0
+                _n_sin_donor_kfm_fin2025 = 0
+                _ref_sin_donor_hist = np.nan
+                _ref_sin_donor_kfm_fin2025 = np.nan
+                _fuente_ref_sin_donor = "P90 del período base"
+
+                if "Sin_C_Donor_modelo" in _features:
+                    _sin_donor_base = pd.to_numeric(
+                        _x_base["Sin_C_Donor_modelo"],
+                        errors="coerce",
+                    ).fillna(0.0) > 0.5
+                    _n_sin_donor_base = int(_sin_donor_base.sum())
+
+                    # Referencia específica solicitada:
+                    # KFM6110 sin C-Donor de fines de 2025 (noviembre/diciembre).
+                    _fin_2025_mask = (
+                        (_fecha >= pd.Timestamp("2025-11-01"))
+                        & (_fecha <= pd.Timestamp("2025-12-31 23:59:59"))
+                    )
+
+                    _sin_donor_mask = (
+                        pd.to_numeric(
+                            df_agrup["Sin_C_Donor_modelo"],
+                            errors="coerce",
+                        ).fillna(0.0) > 0.5
+                    )
+
+                    _kfm_mask = pd.Series(True, index=df_agrup.index)
+                    if "Producto" in df_agrup.columns:
+                        _producto_norm_modelo = (
+                            df_agrup["Producto"]
+                            .astype("string")
+                            .map(normalizar_producto_operativo)
+                        )
+                        _kfm_mask = _producto_norm_modelo.astype("string").eq("KFM6110")
+
+                    _sin_donor_kfm_fin2025_mask = (
+                        _fin_2025_mask
+                        & _sin_donor_mask
+                        & _kfm_mask
+                        & _presion_ok
+                        & _rendimiento.notna()
+                    )
+
+                    if "Nivel_R2301" in df_agrup.columns:
+                        _nivel_kfm = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
+                        _sin_donor_kfm_fin2025_mask = (
+                            _sin_donor_kfm_fin2025_mask
+                            & (_nivel_kfm > 60.0)
+                            & (_nivel_kfm < 70.0)
+                        )
+
+                    if "Calor_reaccion_URA" in df_agrup.columns:
+                        _ura_kfm = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
+                        _sin_donor_kfm_fin2025_mask = (
+                            _sin_donor_kfm_fin2025_mask
+                            & (_ura_kfm > 8000.0)
+                            & (_ura_kfm < 13000.0)
+                        )
+
+                    for _f_kfm in ["Conc_H2", "Conc_propano", "Slurry", "Temperatura_R2301"]:
+                        if _f_kfm in df_agrup.columns:
+                            _sin_donor_kfm_fin2025_mask = (
+                                _sin_donor_kfm_fin2025_mask
+                                & pd.to_numeric(df_agrup[_f_kfm], errors="coerce").notna()
+                            )
+
+                    _y_sin_donor_kfm_fin2025 = _rendimiento.loc[
+                        _sin_donor_kfm_fin2025_mask
+                    ].dropna()
+                    _n_sin_donor_kfm_fin2025 = int(len(_y_sin_donor_kfm_fin2025))
+
+                    if _n_sin_donor_kfm_fin2025 >= 2:
+                        # Mediana robusta del KFM6110 sin donor de nov/dic-2025.
+                        _ref_sin_donor_kfm_fin2025 = float(_y_sin_donor_kfm_fin2025.median())
+                        _fuente_ref_sin_donor = "KFM6110 sin C-Donor nov/dic-2025"
+
+                    # Fallback: referencia histórica confiable sin donor.
+                    # Se usa solo si no hay suficientes puntos KFM nov/dic-2025.
+                    _evento_excluido_hist = (
+                        (_fecha >= pd.Timestamp("2024-11-01"))
+                        & (_fecha <= pd.Timestamp("2025-04-30 23:59:59"))
+                    )
+
+                    _sin_donor_hist_mask = (
+                        _sin_donor_mask
+                        & _presion_ok
+                        & _rendimiento.notna()
+                        & (~_evento_excluido_hist)
+                    )
+
+                    if "Nivel_R2301" in df_agrup.columns:
+                        _nivel_hist = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
+                        _sin_donor_hist_mask = _sin_donor_hist_mask & (_nivel_hist > 60.0) & (_nivel_hist < 70.0)
+
+                    if "Calor_reaccion_URA" in df_agrup.columns:
+                        _ura_hist = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
+                        _sin_donor_hist_mask = _sin_donor_hist_mask & (_ura_hist > 8000.0) & (_ura_hist < 13000.0)
+
+                    for _f_hist in ["Conc_H2", "Conc_propano", "Slurry", "Temperatura_R2301"]:
+                        if _f_hist in df_agrup.columns:
+                            _sin_donor_hist_mask = _sin_donor_hist_mask & pd.to_numeric(
+                                df_agrup[_f_hist],
+                                errors="coerce",
+                            ).notna()
+
+                    _y_sin_donor_hist = _rendimiento.loc[_sin_donor_hist_mask].dropna()
+                    _n_sin_donor_hist = int(len(_y_sin_donor_hist))
+
+                    if _n_sin_donor_hist >= 3:
+                        _ref_sin_donor_hist = float(_y_sin_donor_hist.median())
+                        if not np.isfinite(_ref_sin_donor_kfm_fin2025):
+                            _fuente_ref_sin_donor = "histórico confiable sin C-Donor"
+
                 # Modelo de correlación: ridge lineal con variables estandarizadas.
                 # Se evita sklearn para mantener requirements liviano.
                 _x_design = np.column_stack([np.ones(len(_x_std)), _x_std])
@@ -1670,7 +1787,58 @@ if unidad.startswith("Polimer") and all(
                         st.caption(
                             "Modelo lineal entrenado con dic-25 a feb-26. "
                             "Los coeficientes se aplican sobre variables estandarizadas. "
-                            "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se aplica un piso P90."
+                            "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se usa una referencia KFM6110 sin donor nov/dic-2025."
+                        )
+
+                        st.markdown("**Diagnóstico del modelo**")
+                        c_diag_1, c_diag_2 = st.columns(2)
+                        with c_diag_1:
+                            st.metric("Puntos base", _n_base_modelo)
+                        with c_diag_2:
+                            st.metric("Sin donor en base", _n_sin_donor_base)
+
+                        c_diag_3, c_diag_4 = st.columns(2)
+                        with c_diag_3:
+                            st.metric("KFM nov/dic-25 sin donor", _n_sin_donor_kfm_fin2025)
+                        with c_diag_4:
+                            st.metric("Histórico sin donor", _n_sin_donor_hist)
+
+                        if _n_sin_donor_kfm_fin2025 < 2:
+                            st.warning(
+                                "No hay suficientes puntos KFM6110 sin C-Donor en nov/dic-2025. "
+                                "La app usará el fallback histórico sin donor o P90 del período base."
+                            )
+                        elif _n_sin_donor_base < 3:
+                            st.info(
+                                "El período base dic-25/feb-26 tiene pocos puntos sin C-Donor. "
+                                "Para KFM se usa la referencia específica de nov/dic-2025."
+                            )
+
+                        if np.isfinite(_ref_sin_donor_kfm_fin2025):
+                            _default_ref_sin_donor = float(_ref_sin_donor_kfm_fin2025)
+                        elif np.isfinite(_ref_sin_donor_hist):
+                            _default_ref_sin_donor = float(_ref_sin_donor_hist)
+                        else:
+                            _default_ref_sin_donor = float(np.nanquantile(_y_np, 0.90))
+
+                        _ref_sin_donor_edit = st.number_input(
+                            "Referencia KFM6110 sin C-Donor",
+                            value=float(_default_ref_sin_donor),
+                            step=0.10,
+                            format="%.4f",
+                            key="ref_sin_donor_kfm_fin_2025_modelo",
+                            help=(
+                                "Valor mínimo razonable para campañas sin C-Donor. "
+                                "Se inicializa con KFM6110 sin C-Donor de nov/dic-2025. "
+                                "Si no alcanza, usa histórico sin donor o P90 del período base."
+                            ),
+                        )
+
+                        st.caption(
+                            "Fuente referencia sin donor: "
+                            f"{_fuente_ref_sin_donor}. "
+                            "Esta corrección usa PRODUCTO solo para seleccionar la referencia KFM6110 nov/dic-2025; "
+                            "PRODUCTO no entra como variable de correlación."
                         )
 
                         _feature_labels_modelo = {
@@ -1816,7 +1984,9 @@ if unidad.startswith("Polimer") and all(
                         ).fillna(0.0).to_numpy(dtype=float) > 0.5
 
                         if np.any(_sin_donor_pred):
-                            _piso_sin_donor = float(np.nanquantile(_y_np, 0.90))
+                            # Referencia sin donor definida en el panel del modelo.
+                            # Evita que KFM caiga por una extrapolación falsa de TEA/C-Donor.
+                            _piso_sin_donor = float(_ref_sin_donor_edit)
                             _pred = np.where(
                                 _sin_donor_pred,
                                 np.maximum(_pred, _piso_sin_donor),
