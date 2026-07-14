@@ -1676,21 +1676,30 @@ if unidad.startswith("Polimer") and all(
                         ).fillna(0.0) > 0.5
                     )
 
-                    _kfm_mask = pd.Series(True, index=df_agrup.index)
+                    _kfm_mask = pd.Series(True, index=df_agrup.index, dtype=bool)
                     if "Producto" in df_agrup.columns:
                         _producto_norm_modelo = (
                             df_agrup["Producto"]
                             .astype("string")
                             .map(normalizar_producto_operativo)
                         )
-                        _kfm_mask = _producto_norm_modelo.astype("string").eq("KFM6110")
+                        # Importante: eq() sobre dtype string puede devolver <NA>.
+                        # Si ese BooleanArray con NA se usa como máscara, Streamlit/Pandas
+                        # puede romper en runtime. Convertimos todo a bool puro.
+                        _kfm_mask = (
+                            _producto_norm_modelo
+                            .astype("string")
+                            .eq("KFM6110")
+                            .fillna(False)
+                            .astype(bool)
+                        )
 
                     _sin_donor_kfm_fin2025_mask = (
-                        _fin_2025_mask
-                        & _sin_donor_mask
-                        & _kfm_mask
-                        & _presion_ok
-                        & _rendimiento.notna()
+                        _fin_2025_mask.astype(bool)
+                        & _sin_donor_mask.astype(bool)
+                        & _kfm_mask.astype(bool)
+                        & _presion_ok.astype(bool)
+                        & _rendimiento.notna().astype(bool)
                     )
 
                     if "Nivel_R2301" in df_agrup.columns:
