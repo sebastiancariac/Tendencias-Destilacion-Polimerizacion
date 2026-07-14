@@ -1495,8 +1495,10 @@ if unidad.startswith("Polimer") and all(
     # Relación TEA/C-Donor:
     # - Se toma la columna Excel si existe.
     # - Si no existe, se calcula como TEA/C_Donor.
-    # - Cuando no hay donor, se fija en 0 y la condición queda representada
-    #   por Sin_C_Donor_modelo.
+    # - Cuando no hay donor, NO se fija en 0, porque eso genera una
+    #   extrapolación falsa y tira el rendimiento estimado hacia abajo.
+    #   En esos puntos luego se reemplaza por el valor neutro del modelo
+    #   y la condición se representa con Sin_C_Donor_modelo.
     _rel_excel = None
     if "Rel_TEA_CDonor" in df_agrup.columns:
         _rel_excel = pd.to_numeric(df_agrup["Rel_TEA_CDonor"], errors="coerce")
@@ -1516,7 +1518,7 @@ if unidad.startswith("Polimer") and all(
     else:
         _rel = pd.Series(np.nan, index=df_agrup.index)
 
-    df_agrup["Rel_TEA_CDonor_modelo"] = _rel.fillna(0.0)
+    df_agrup["Rel_TEA_CDonor_modelo"] = _rel
 
     # Features pedidas para la correlación.
     _features_candidatas = [
@@ -1667,7 +1669,8 @@ if unidad.startswith("Polimer") and all(
                     with st.expander("Ecuación editable", expanded=False):
                         st.caption(
                             "Modelo lineal entrenado con dic-25 a feb-26. "
-                            "Los coeficientes se aplican sobre variables estandarizadas."
+                            "Los coeficientes se aplican sobre variables estandarizadas. "
+                            "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se aplica un piso P90."
                         )
 
                         _feature_labels_modelo = {
@@ -1765,6 +1768,31 @@ if unidad.startswith("Polimer") and all(
                 for _f in _features:
                     _x_all[_f] = pd.to_numeric(_x_all[_f], errors="coerce")
 
+                # Tratamiento especial para campañas sin C-Donor:
+                # TEA/C-Donor es indefinido cuando C-Donor = 0. Si se lo fuerza
+                # a cero, el modelo interpreta una condición artificial extrema
+                # y puede hacer caer el rendimiento estimado de KFM.
+                # Por eso se usa el valor neutro del modelo (mediana del período
+                # base) y se deja que la variable Sin_C_Donor_modelo capture
+                # el efecto de trabajar sin donor.
+                if "Rel_TEA_CDonor_modelo" in _features:
+                    _rel_mediana_modelo = float(_med["Rel_TEA_CDonor_modelo"])
+
+                    _x_all["Rel_TEA_CDonor_modelo"] = _x_all[
+                        "Rel_TEA_CDonor_modelo"
+                    ].fillna(_rel_mediana_modelo)
+
+                    if "Sin_C_Donor_modelo" in _features:
+                        _sin_donor_all = pd.to_numeric(
+                            _x_all["Sin_C_Donor_modelo"],
+                            errors="coerce",
+                        ).fillna(0.0) > 0.5
+
+                        _x_all.loc[
+                            _sin_donor_all,
+                            "Rel_TEA_CDonor_modelo",
+                        ] = _rel_mediana_modelo
+
                 _valid_all = _x_all.notna().all(axis=1)
                 _idx_all = df_agrup.index[_valid_all].to_numpy()
 
@@ -1774,6 +1802,26 @@ if unidad.startswith("Polimer") and all(
                     _x_all_design = np.column_stack([np.ones(len(_x_all_std)), _x_all_std])
 
                     _pred = _x_all_design @ _beta
+
+                    # Campañas sin C-Donor:
+                    # si el período base no contiene suficientes ejemplos sin donor,
+                    # el coeficiente de Sin_C_Donor_modelo no puede aprender bien
+                    # el efecto real. Operativamente, sin donor no debería bajar
+                    # el rendimiento estimado; por eso se aplica un piso alto de
+                    # referencia tomado del propio período confiable.
+                    if "Sin_C_Donor_modelo" in _features:
+                        _sin_donor_pred = pd.to_numeric(
+                            _x_all.loc[_valid_all, "Sin_C_Donor_modelo"],
+                            errors="coerce",
+                        ).fillna(0.0).to_numpy(dtype=float) > 0.5
+
+                        if np.any(_sin_donor_pred):
+                            _piso_sin_donor = float(np.nanquantile(_y_np, 0.90))
+                            _pred = np.where(
+                                _sin_donor_pred,
+                                np.maximum(_pred, _piso_sin_donor),
+                                _pred,
+                            )
 
                     # Evitar extrapolaciones absurdas: permitir margen alrededor
                     # del rango de la base, pero no valores físicamente irreales.
