@@ -1899,31 +1899,34 @@ if unidad.startswith("Polimer") and all(
                             continue
 
                         _med_prod = float(_y_prod.median())
+                        _q05_prod = float(_y_prod.quantile(0.05))
                         _q10_prod = float(_y_prod.quantile(0.10))
                         _q25_prod = float(_y_prod.quantile(0.25))
                         _q75_prod = float(_y_prod.quantile(0.75))
                         _q90_prod = float(_y_prod.quantile(0.90))
+                        _q95_prod = float(_y_prod.quantile(0.95))
                         _iqr_prod = max(_q75_prod - _q25_prod, 0.0)
 
-                        # Banda robusta. Para n bajo, se usa una banda más conservadora
-                        # alrededor de la mediana del grado.
+                        # Banda de plausibilidad por grado.
+                        # No debe actuar como target. Solo evita extrapolaciones absurdas.
+                        # Se amplía para no recortar rendimientos altos reales como KYD6110.
                         if len(_y_prod) < 5:
-                            _margen_prod = max(1.00, 0.25 * _iqr_prod)
-                            _lim_inf_prod = _med_prod - max(1.25, _margen_prod)
-                            _lim_sup_prod = _med_prod + max(1.25, _margen_prod)
+                            _margen_prod = max(1.25, 0.35 * _iqr_prod)
+                            _lim_inf_prod = min(_q10_prod - 0.50, _med_prod - _margen_prod)
+                            _lim_sup_prod = max(_q90_prod + 0.50, _med_prod + _margen_prod)
                         else:
-                            _margen_prod = max(0.65, 0.30 * _iqr_prod)
-                            _lim_inf_prod = min(_q10_prod - _margen_prod, _med_prod - 0.65)
-                            _lim_sup_prod = max(_q90_prod + _margen_prod, _med_prod + 0.65)
+                            _margen_prod = max(0.90, 0.45 * _iqr_prod)
+                            _lim_inf_prod = min(_q05_prod - _margen_prod, _med_prod - 1.00)
+                            _lim_sup_prod = max(_q95_prod + _margen_prod, _med_prod + 1.00)
 
-                        # Límite adicional para que outliers históricos no abran demasiado la banda.
+                        # Límite adicional: evita outliers únicos, pero permite operación alta real.
                         _lim_sup_prod = min(
                             _lim_sup_prod,
-                            _med_prod + max(1.75, 1.50 * _iqr_prod + 0.50),
+                            _med_prod + max(3.00, 2.50 * _iqr_prod + 1.00),
                         )
                         _lim_inf_prod = max(
                             _lim_inf_prod,
-                            _med_prod - max(1.75, 1.50 * _iqr_prod + 0.50),
+                            _med_prod - max(3.00, 2.50 * _iqr_prod + 1.00),
                         )
 
                         _producto_stats[str(_prod)] = {
@@ -1934,8 +1937,10 @@ if unidad.startswith("Polimer") and all(
                             "mediana": _med_prod,
                             "lim_inf": float(_lim_inf_prod),
                             "lim_sup": float(_lim_sup_prod),
+                            "q05": _q05_prod,
                             "q10": _q10_prod,
                             "q90": _q90_prod,
+                            "q95": _q95_prod,
                         }
 
                         _filas_prod_stats.append(
@@ -1948,8 +1953,10 @@ if unidad.startswith("Polimer") and all(
                                 "Mediana": _med_prod,
                                 "Lim_inf": float(_lim_inf_prod),
                                 "Lim_sup": float(_lim_sup_prod),
+                                "Q05": _q05_prod,
                                 "Q10": _q10_prod,
                                 "Q90": _q90_prod,
+                                "Q95": _q95_prod,
                             }
                         )
 
@@ -2096,6 +2103,23 @@ if unidad.startswith("Polimer") and all(
                                 )
                                 st.dataframe(
                                     _bias_df_visible.round(3),
+                                    width="stretch",
+                                    hide_index=True,
+                                )
+
+                        _ref_local_df_visible = st.session_state.get(
+                            "producto_ref_local_df_modelo",
+                            pd.DataFrame(),
+                        )
+
+                        if isinstance(_ref_local_df_visible, pd.DataFrame) and len(_ref_local_df_visible) > 0:
+                            with st.expander("Ver referencia local por grado", expanded=False):
+                                st.caption(
+                                    "Ref_local es el percentil 60 de puntos del mismo grado con condiciones de proceso similares. "
+                                    "Sirve para revisar casos como KYD6110 alto real o grados sobreestimados."
+                                )
+                                st.dataframe(
+                                    _ref_local_df_visible.round(3),
                                     width="stretch",
                                     hide_index=True,
                                 )
@@ -2391,9 +2415,15 @@ if unidad.startswith("Polimer") and all(
                                 _pred,
                             )
 
-                    # Aplicar bandas históricas por grado.
-                    # Esto evita picos irreales en SMD6200 y en cualquier otro grado
-                    # cuando el modelo lineal extrapola fuera de la nube confiable.
+                    # Aplicar calibración local por grado.
+                    #
+                    # No se empuja siempre hacia la mediana del grado, porque eso
+                    # subestima casos altos reales como KYD6110. En su lugar:
+                    # - se buscan vecinos históricos del mismo grado con variables
+                    #   de proceso similares,
+                    # - se usa el P60 de esos vecinos como referencia local,
+                    # - se combina con el modelo,
+                    # - y finalmente se aplica la banda de plausibilidad.
                     if "Producto" in df_agrup.columns and isinstance(_producto_stats, dict) and len(_producto_stats) > 0:
                         _producto_pred = (
                             df_agrup.loc[_idx_all, "Producto"]
@@ -2402,6 +2432,17 @@ if unidad.startswith("Polimer") and all(
                         )
 
                         _pred_corregida_producto = _pred.copy()
+
+                        try:
+                            _x_all_std_df = pd.DataFrame(
+                                _x_all_std,
+                                index=_idx_all,
+                                columns=_features,
+                            )
+                        except Exception:
+                            _x_all_std_df = pd.DataFrame()
+
+                        _filas_local_ref = []
 
                         for _i_pred, _prod_pred in enumerate(_producto_pred):
                             if pd.isna(_prod_pred):
@@ -2412,30 +2453,79 @@ if unidad.startswith("Polimer") and all(
                             if not _stat_prod:
                                 continue
 
+                            _idx_pred_actual = _idx_all[_i_pred]
                             _lim_inf_prod = float(_stat_prod["lim_inf"])
                             _lim_sup_prod = float(_stat_prod["lim_sup"])
                             _med_prod = float(_stat_prod["mediana"])
                             _n_prod = int(_stat_prod.get("n", 0))
 
-                            # Pull suave hacia el histórico del grado.
-                            #
-                            # - Si hay buen histórico del grado, confiamos más en su
-                            #   comportamiento típico.
-                            # - Si hay poco histórico, dejamos pesar más al modelo.
-                            #
-                            # Esto no convierte al grado en target fijo: solo reduce
-                            # sobre/subestimaciones sistemáticas y evita picos.
-                            if _n_prod >= 8:
-                                _peso_modelo_grado = 0.50
-                            elif _n_prod >= 4:
-                                _peso_modelo_grado = 0.60
-                            else:
-                                _peso_modelo_grado = 0.70
+                            _pred_actual = float(_pred_corregida_producto[_i_pred])
+                            _ref_local = np.nan
+                            _n_vecinos = 0
 
-                            _pred_blend = (
-                                _peso_modelo_grado * _pred_corregida_producto[_i_pred]
-                                + (1.0 - _peso_modelo_grado) * _med_prod
-                            )
+                            if (
+                                isinstance(_x_all_std_df, pd.DataFrame)
+                                and len(_x_all_std_df) > 0
+                                and "_producto_norm_all" in locals()
+                                and "_mask_producto_bias_ref" in locals()
+                            ):
+                                try:
+                                    _mask_ref_local = (
+                                        _mask_producto_bias_ref
+                                        & _producto_norm_all.astype("string").eq(str(_prod_pred)).fillna(False)
+                                        & df_agrup.index.isin(_x_all_std_df.index)
+                                        & (df_agrup.index != _idx_pred_actual)
+                                    )
+
+                                    _idx_ref_local = df_agrup.index[_mask_ref_local]
+
+                                    if len(_idx_ref_local) >= 3 and _idx_pred_actual in _x_all_std_df.index:
+                                        _x_ref_local = _x_all_std_df.loc[_idx_ref_local]
+                                        _x_actual_local = _x_all_std_df.loc[_idx_pred_actual]
+
+                                        _dist_local = ((_x_ref_local - _x_actual_local) ** 2).sum(axis=1)
+                                        _k_local = min(max(4, len(_idx_ref_local) // 3), 12, len(_idx_ref_local))
+                                        _idx_nn_local = _dist_local.sort_values().index[:_k_local]
+
+                                        _y_nn_local = pd.to_numeric(
+                                            _rendimiento.loc[_idx_nn_local],
+                                            errors="coerce",
+                                        ).dropna()
+
+                                        _n_vecinos = int(len(_y_nn_local))
+
+                                        if _n_vecinos >= 3:
+                                            # Referencia buena pero no extrema para condiciones similares.
+                                            _ref_local = float(_y_nn_local.quantile(0.60))
+
+                                except Exception:
+                                    _ref_local = np.nan
+                                    _n_vecinos = 0
+
+                            if np.isfinite(_ref_local):
+                                if _n_vecinos >= 8:
+                                    _peso_modelo_grado = 0.35
+                                else:
+                                    _peso_modelo_grado = 0.45
+
+                                _pred_blend = (
+                                    _peso_modelo_grado * _pred_actual
+                                    + (1.0 - _peso_modelo_grado) * _ref_local
+                                )
+                            else:
+                                # Sin referencia local: corrección suave a mediana,
+                                # menos agresiva que antes.
+                                if _n_prod >= 8:
+                                    _peso_modelo_grado = 0.70
+                                elif _n_prod >= 4:
+                                    _peso_modelo_grado = 0.75
+                                else:
+                                    _peso_modelo_grado = 0.85
+
+                                _pred_blend = (
+                                    _peso_modelo_grado * _pred_actual
+                                    + (1.0 - _peso_modelo_grado) * _med_prod
+                                )
 
                             _pred_corregida_producto[_i_pred] = np.clip(
                                 _pred_blend,
@@ -2443,7 +2533,26 @@ if unidad.startswith("Polimer") and all(
                                 _lim_sup_prod,
                             )
 
+                            _filas_local_ref.append(
+                                {
+                                    "Producto": str(_prod_pred),
+                                    "Fecha": df_agrup.loc[_idx_pred_actual, "Fecha_y_hora"] if "Fecha_y_hora" in df_agrup.columns else _idx_pred_actual,
+                                    "Pred_modelo": _pred_actual,
+                                    "Ref_local": _ref_local,
+                                    "n_vecinos": _n_vecinos,
+                                    "Mediana_grado": _med_prod,
+                                    "Pred_corregida": float(_pred_corregida_producto[_i_pred]),
+                                    "Lim_inf": _lim_inf_prod,
+                                    "Lim_sup": _lim_sup_prod,
+                                }
+                            )
+
                         _pred = _pred_corregida_producto
+
+                        try:
+                            st.session_state["producto_ref_local_df_modelo"] = pd.DataFrame(_filas_local_ref)
+                        except Exception:
+                            pass
 
                     # Evitar extrapolaciones absurdas globales: permitir margen alrededor
                     # del rango de la base, pero no valores físicamente irreales.
