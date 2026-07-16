@@ -1468,112 +1468,88 @@ if unidad.startswith("Polimer") and all(
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
     _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
 
-    # Benchmark de lechos/catalizador sanos.
+    # Benchmark independiente del cambio de lecho.
     #
-    # Noviembre 2025 fue identificado por operación como un ejemplo claro
-    # del impacto del cambio de lecho. Por eso el benchmark debe entrenarse
-    # con un período posterior al cambio, no con campañas bajo sospecha.
+    # Objetivo del modelo:
+    # estimar el rendimiento esperado por variables críticas de proceso/catalizador.
+    # El cambio de lecho NO debe ser una variable ni un criterio directo,
+    # porque justamente se quiere usar el desvío real vs estimado para decidir
+    # si el lecho puede estar impactando la actividad.
     with sidebar_modelo:
         st.markdown("---")
         st.subheader("Modelo rendimiento estimado")
 
-        with st.expander("Benchmark lechos sanos", expanded=True):
+        with st.expander("Benchmark por variables críticas", expanded=True):
             st.caption(
-                "Usá un período posterior al cambio de lecho para que el estimado represente "
-                "rendimiento esperado con lechos/catalizador sanos."
+                "El estimado NO depende del cambio de lecho. Se calcula con variables críticas "
+                "de proceso/catalizador y se usa para comparar contra el real."
             )
 
-            _fecha_cambio_lecho = st.date_input(
-                "Fecha cambio de lecho",
-                value=pd.Timestamp("2025-11-01").date(),
-                key="fecha_cambio_lecho_benchmark",
-                help="Ajustar con la fecha real del cambio de lecho de noviembre 2025.",
-            )
-
-            c_bench_1, c_bench_2 = st.columns(2)
-            with c_bench_1:
-                _dias_estabilizacion_lecho = st.number_input(
-                    "Días estabilización",
-                    min_value=0,
-                    max_value=45,
-                    value=7,
-                    step=1,
-                    key="dias_estabilizacion_lecho",
-                    help="Días posteriores al cambio que se excluyen por transición/estabilización.",
-                )
-            with c_bench_2:
-                _dias_benchmark_lecho = st.number_input(
-                    "Días benchmark",
-                    min_value=30,
-                    max_value=240,
-                    value=120,
-                    step=5,
-                    key="dias_benchmark_lecho",
-                    help="Ventana usada para entrenar el benchmark sano posterior al cambio.",
-                )
-
-            st.markdown("**Período adicional de referencia sana**")
-            _usar_abril_2025_benchmark = st.checkbox(
-                "Incluir abril 2025",
+            _usar_todo_historico_valido = st.checkbox(
+                "Usar todo el histórico válido",
                 value=True,
-                key="usar_abril_2025_benchmark_sano",
+                key="usar_todo_historico_valido_modelo",
                 help=(
-                    "Incluye abril 2025 como período adicional de referencia sana, "
-                    "además del período posterior al cambio de lecho de noviembre 2025."
+                    "Recomendado para diagnóstico de lechos: el modelo aprende de condiciones "
+                    "operativas comparables, no de la fecha de cambio de lecho."
                 ),
             )
 
-            c_abril_1, c_abril_2 = st.columns(2)
-            with c_abril_1:
-                _inicio_abril_2025 = st.date_input(
-                    "Inicio abril 2025",
-                    value=pd.Timestamp("2025-04-01").date(),
-                    key="inicio_abril_2025_benchmark",
-                )
-            with c_abril_2:
-                _fin_abril_2025 = st.date_input(
-                    "Fin abril 2025",
-                    value=pd.Timestamp("2025-04-30").date(),
-                    key="fin_abril_2025_benchmark",
-                )
-
-            _usar_fallback_historico_producto = st.checkbox(
-                "Permitir fallback histórico por grado",
-                value=False,
-                key="fallback_historico_producto_sano",
-                help=(
-                    "Si un grado no tiene suficientes datos en los períodos sanos definidos, "
-                    "permite usar histórico fuera del benchmark. Para diagnóstico de contaminantes, "
-                    "conviene dejarlo desactivado."
-                ),
+            st.markdown("**Exclusiones por datos no confiables**")
+            _excluir_evento_bajo_nivel = st.checkbox(
+                "Excluir evento bajo nivel reactor",
+                value=True,
+                key="excluir_evento_bajo_nivel_modelo",
+                help="Excluye el período con baja productividad por bajo nivel no detectado.",
             )
 
-    _inicio_benchmark_lecho = (
-        pd.Timestamp(_fecha_cambio_lecho)
-        + pd.Timedelta(days=int(_dias_estabilizacion_lecho))
-    )
-    _fin_benchmark_lecho = (
-        _inicio_benchmark_lecho
-        + pd.Timedelta(days=int(_dias_benchmark_lecho))
-    )
+            c_exc_1, c_exc_2 = st.columns(2)
+            with c_exc_1:
+                _inicio_evento_bajo_nivel = st.date_input(
+                    "Inicio evento",
+                    value=pd.Timestamp("2024-11-01").date(),
+                    key="inicio_evento_bajo_nivel_modelo",
+                )
+            with c_exc_2:
+                _fin_evento_bajo_nivel = st.date_input(
+                    "Fin evento",
+                    value=pd.Timestamp("2025-03-31").date(),
+                    key="fin_evento_bajo_nivel_modelo",
+                    help=(
+                        "Marzo 2025 por defecto para que abril 2025 pueda entrar "
+                        "como dato válido, según tu criterio."
+                    ),
+                )
 
-    _periodo_base_post_lecho = (
-        (_fecha >= _inicio_benchmark_lecho)
-        & (_fecha <= _fin_benchmark_lecho)
-    )
+            _min_puntos_modelo = st.number_input(
+                "Mínimo puntos benchmark",
+                min_value=20,
+                max_value=1000,
+                value=80,
+                step=10,
+                key="min_puntos_modelo_critico",
+                help="Cantidad mínima deseada de puntos válidos para entrenar el modelo.",
+            )
 
-    _periodo_abril_2025 = (
-        (_fecha >= pd.Timestamp(_inicio_abril_2025))
-        & (_fecha <= pd.Timestamp(_fin_abril_2025) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-    )
-
-    if bool(_usar_abril_2025_benchmark):
-        _periodo_base_modelo = _periodo_base_post_lecho | _periodo_abril_2025
-    else:
-        _periodo_base_modelo = _periodo_base_post_lecho
+            st.info(
+                "Criterio diagnóstico: si Real - Estimado es negativo de forma sostenida, "
+                "puede indicar pérdida de actividad, contaminante o necesidad de revisar lechos. "
+                "El modelo no usa la fecha de cambio de lecho como variable."
+            )
 
     _presion_ok = (_presion > 30.0) & (_presion < 31.0)
 
+    _periodo_base_modelo = pd.Series(True, index=df_agrup.index)
+
+    if bool(_excluir_evento_bajo_nivel):
+        _evento_bajo_nivel = (
+            (_fecha >= pd.Timestamp(_inicio_evento_bajo_nivel))
+            & (_fecha <= pd.Timestamp(_fin_evento_bajo_nivel) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        )
+        _periodo_base_modelo = _periodo_base_modelo & (~_evento_bajo_nivel)
+
+    # Referencia del modelo: histórico válido por variables críticas.
+    # No representa lecho sano por fecha; representa condiciones operativas confiables.
     _periodo_referencia_sana = _periodo_base_modelo & _presion_ok
 
     # ----------------------------------------------------------------------
@@ -1618,14 +1594,22 @@ if unidad.startswith("Polimer") and all(
 
     df_agrup["Rel_TEA_CDonor_modelo"] = _rel
 
-    # Features pedidas para la correlación.
+    # Variables críticas para la correlación.
+    #
+    # No se incluye cambio de lecho. El objetivo es que el modelo estime
+    # el rendimiento esperado por condición de operación/catalizador.
     _features_candidatas = [
+        "MFI_polvo",
+        "XS",
         "Conc_H2",
         "Conc_propano",
         "Slurry",
         "Rel_TEA_CDonor_modelo",
-        "Temperatura_R2301",
+        "C_Donor",
         "Sin_C_Donor_modelo",
+        "Temperatura_R2301",
+        "Tipo_catalizador_productividad",
+        "Indicador_ZN389_activo",
     ]
 
     _features = []
@@ -1672,6 +1656,15 @@ if unidad.startswith("Polimer") and all(
 
         if "Conc_H2" in _features:
             _base_mask = _base_mask & (pd.to_numeric(df_agrup["Conc_H2"], errors="coerce") > 0.0)
+
+        if "MFI_polvo" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") > 0.0)
+
+        if "XS" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["XS"], errors="coerce") >= 0.0)
+
+        if "C_Donor" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["C_Donor"], errors="coerce") >= 0.0)
 
         for _f in _features:
             _base_mask = _base_mask & pd.to_numeric(df_agrup[_f], errors="coerce").notna()
@@ -1729,14 +1722,24 @@ if unidad.startswith("Polimer") and all(
                         _pesos.append(5.0)
                     elif _f == "Rel_TEA_CDonor_modelo":
                         _pesos.append(4.5)
+                    elif _f == "C_Donor":
+                        _pesos.append(4.0)
                     elif _f == "Conc_propano":
-                        _pesos.append(3.5)
+                        _pesos.append(3.8)
                     elif _f == "Conc_H2":
-                        _pesos.append(3.2)
+                        _pesos.append(3.5)
                     elif _f == "Slurry":
+                        _pesos.append(3.2)
+                    elif _f == "MFI_polvo":
                         _pesos.append(3.0)
+                    elif _f == "XS":
+                        _pesos.append(2.8)
                     elif _f == "Temperatura_R2301":
                         _pesos.append(2.7)
+                    elif _f == "Tipo_catalizador_productividad":
+                        _pesos.append(2.5)
+                    elif _f == "Indicador_ZN389_activo":
+                        _pesos.append(2.5)
                     else:
                         _pesos.append(1.0)
 
@@ -2093,7 +2096,7 @@ if unidad.startswith("Polimer") and all(
                 with sidebar_modelo:
                     with st.expander("Ecuación editable", expanded=False):
                         st.caption(
-                            "Modelo lineal entrenado con el período benchmark de lechos sanos. "
+                            "Modelo lineal entrenado con histórico válido y variables críticas. "
                             "Los coeficientes se aplican sobre variables estandarizadas. "
                             "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se usa una referencia KFM6110 sin donor abr/may-2026."
                         )
@@ -2101,20 +2104,10 @@ if unidad.startswith("Polimer") and all(
                         st.markdown("**Diagnóstico del modelo**")
                         c_diag_1, c_diag_2 = st.columns(2)
                         with c_diag_1:
-                            st.metric("Puntos benchmark", _n_base_modelo)
+                            st.metric("Puntos histórico válido", _n_base_modelo)
                         with c_diag_2:
-                            st.metric("Sin donor benchmark", _n_sin_donor_base)
+                            st.metric("Sin donor histórico", _n_sin_donor_base)
 
-                        try:
-                            _n_bench_abril = int((_periodo_abril_2025 & _presion_ok).sum()) if bool(_usar_abril_2025_benchmark) else 0
-                            _n_bench_post_lecho = int((_periodo_base_post_lecho & _presion_ok).sum())
-                            c_diag_abril_1, c_diag_abril_2 = st.columns(2)
-                            with c_diag_abril_1:
-                                st.metric("Benchmark abril 2025", _n_bench_abril)
-                            with c_diag_abril_2:
-                                st.metric("Benchmark post lecho", _n_bench_post_lecho)
-                        except Exception:
-                            pass
 
                         c_diag_3, c_diag_4 = st.columns(2)
                         with c_diag_3:
