@@ -1790,6 +1790,107 @@ if unidad.startswith("Polimer") and all(
                         if not np.isfinite(_ref_sin_donor_kfm_fin2025):
                             _fuente_ref_sin_donor = "histórico confiable sin C-Donor"
 
+                # Bandas históricas por grado/producto normalizado.
+                #
+                # Criterio:
+                # - PRODUCTO no entra como variable de la correlación.
+                # - Sí se usa como límite operativo para evitar extrapolaciones irreales
+                #   del modelo lineal. Esto corrige casos como SMD6200 o cualquier otro
+                #   grado donde la extrapolación se va a valores muy altos.
+                _producto_stats = {}
+                _producto_stats_df = pd.DataFrame()
+                _n_producto_stats = 0
+
+                if "Producto" in df_agrup.columns:
+                    _producto_norm_all = (
+                        df_agrup["Producto"]
+                        .astype("string")
+                        .map(normalizar_producto_operativo)
+                    )
+
+                    _evento_excluido_producto = (
+                        (_fecha >= pd.Timestamp("2024-11-01"))
+                        & (_fecha <= pd.Timestamp("2025-04-30 23:59:59"))
+                    )
+
+                    _mask_producto_ref = (
+                        _presion_ok
+                        & _rendimiento.notna()
+                        & (~_evento_excluido_producto)
+                        & _producto_norm_all.notna()
+                    )
+
+                    if "Nivel_R2301" in df_agrup.columns:
+                        _nivel_prod = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
+                        _mask_producto_ref = _mask_producto_ref & (_nivel_prod > 60.0) & (_nivel_prod < 70.0)
+
+                    if "Calor_reaccion_URA" in df_agrup.columns:
+                        _ura_prod = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
+                        _mask_producto_ref = _mask_producto_ref & (_ura_prod > 8000.0) & (_ura_prod < 13000.0)
+
+                    if "Slurry" in df_agrup.columns:
+                        _slurry_prod = pd.to_numeric(df_agrup["Slurry"], errors="coerce")
+                        _mask_producto_ref = _mask_producto_ref & (_slurry_prod > 50.0)
+
+                    _df_prod_ref = pd.DataFrame(
+                        {
+                            "Producto_norm": _producto_norm_all,
+                            "Rendimiento": _rendimiento,
+                        },
+                        index=df_agrup.index,
+                    ).loc[_mask_producto_ref].dropna()
+
+                    _filas_prod_stats = []
+
+                    for _prod, _grp in _df_prod_ref.groupby("Producto_norm"):
+                        _y_prod = pd.to_numeric(_grp["Rendimiento"], errors="coerce").dropna()
+
+                        if len(_y_prod) < 2:
+                            continue
+
+                        _med_prod = float(_y_prod.median())
+                        _q10_prod = float(_y_prod.quantile(0.10))
+                        _q25_prod = float(_y_prod.quantile(0.25))
+                        _q75_prod = float(_y_prod.quantile(0.75))
+                        _q90_prod = float(_y_prod.quantile(0.90))
+                        _iqr_prod = max(_q75_prod - _q25_prod, 0.0)
+
+                        # Banda robusta. Se permite algo de movimiento respecto al histórico,
+                        # pero no picos incompatibles con el grado.
+                        _margen_prod = max(0.75, 0.35 * _iqr_prod)
+
+                        _lim_inf_prod = min(_q10_prod - _margen_prod, _med_prod - 0.75)
+                        _lim_sup_prod = max(_q90_prod + _margen_prod, _med_prod + 0.75)
+
+                        # Límite adicional para que un outlier histórico no abra demasiado la banda.
+                        _lim_sup_prod = min(_lim_sup_prod, _med_prod + max(2.0, 2.0 * _iqr_prod + 0.75))
+                        _lim_inf_prod = max(_lim_inf_prod, _med_prod - max(2.0, 2.0 * _iqr_prod + 0.75))
+
+                        _producto_stats[str(_prod)] = {
+                            "n": int(len(_y_prod)),
+                            "mediana": _med_prod,
+                            "lim_inf": float(_lim_inf_prod),
+                            "lim_sup": float(_lim_sup_prod),
+                            "q10": _q10_prod,
+                            "q90": _q90_prod,
+                        }
+
+                        _filas_prod_stats.append(
+                            {
+                                "Producto": str(_prod),
+                                "n": int(len(_y_prod)),
+                                "Mediana": _med_prod,
+                                "Lim_inf": float(_lim_inf_prod),
+                                "Lim_sup": float(_lim_sup_prod),
+                                "Q10": _q10_prod,
+                                "Q90": _q90_prod,
+                            }
+                        )
+
+                    if _filas_prod_stats:
+                        _producto_stats_df = pd.DataFrame(_filas_prod_stats).sort_values("Producto")
+                        _n_producto_stats = int(len(_producto_stats_df))
+
                 # Modelo de correlación: ridge lineal con variables estandarizadas.
                 # Se evita sklearn para mantener requirements liviano.
                 _x_design = np.column_stack([np.ones(len(_x_std)), _x_std])
@@ -1901,6 +2002,20 @@ if unidad.startswith("Polimer") and all(
                             "PRODUCTO no entra como variable de correlación. "
                             "Para evitar extrapolaciones irreales, KFM sin donor queda acotado entre el mínimo y máximo indicados."
                         )
+
+                        st.markdown("**Bandas históricas por grado**")
+                        st.caption(
+                            f"Grados con banda disponible: {_n_producto_stats}. "
+                            "Estas bandas no son parte de la ecuación; solo limitan extrapolaciones irreales del modelo."
+                        )
+
+                        if isinstance(_producto_stats_df, pd.DataFrame) and len(_producto_stats_df) > 0:
+                            with st.expander("Ver bandas por grado", expanded=False):
+                                st.dataframe(
+                                    _producto_stats_df.round(3),
+                                    width="stretch",
+                                    hide_index=True,
+                                )
 
                         _feature_labels_modelo = {
                             "Conc_H2": "Concentración H2",
@@ -2074,7 +2189,42 @@ if unidad.startswith("Polimer") and all(
                                 _pred,
                             )
 
-                    # Evitar extrapolaciones absurdas: permitir margen alrededor
+                    # Aplicar bandas históricas por grado.
+                    # Esto evita picos irreales en SMD6200 y en cualquier otro grado
+                    # cuando el modelo lineal extrapola fuera de la nube confiable.
+                    if "Producto" in df_agrup.columns and isinstance(_producto_stats, dict) and len(_producto_stats) > 0:
+                        _producto_pred = (
+                            df_agrup.loc[_idx_all, "Producto"]
+                            .astype("string")
+                            .map(normalizar_producto_operativo)
+                        )
+
+                        _pred_corregida_producto = _pred.copy()
+
+                        for _i_pred, _prod_pred in enumerate(_producto_pred):
+                            if pd.isna(_prod_pred):
+                                continue
+
+                            _stat_prod = _producto_stats.get(str(_prod_pred))
+
+                            if not _stat_prod:
+                                continue
+
+                            _lim_inf_prod = float(_stat_prod["lim_inf"])
+                            _lim_sup_prod = float(_stat_prod["lim_sup"])
+
+                            # La banda del grado es un límite de plausibilidad,
+                            # no una media forzada. Si el modelo está dentro de la banda,
+                            # se conserva.
+                            _pred_corregida_producto[_i_pred] = np.clip(
+                                _pred_corregida_producto[_i_pred],
+                                _lim_inf_prod,
+                                _lim_sup_prod,
+                            )
+
+                        _pred = _pred_corregida_producto
+
+                    # Evitar extrapolaciones absurdas globales: permitir margen alrededor
                     # del rango de la base, pero no valores físicamente irreales.
                     _y_min = float(np.nanmin(_y_np))
                     _y_max = float(np.nanmax(_y_np))
