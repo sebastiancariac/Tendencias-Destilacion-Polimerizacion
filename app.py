@@ -1916,7 +1916,7 @@ if unidad.startswith("Polimer") and all(
                     )
 
                     # Referencia estricta por grado:
-                    # usar solo el período benchmark post cambio de lecho.
+                    # usar histórico válido por variables críticas.
                     _mask_producto_ref = (
                         _periodo_referencia_sana
                         & _rendimiento.notna()
@@ -1943,27 +1943,18 @@ if unidad.startswith("Polimer") and all(
                         index=df_agrup.index,
                     ).loc[_mask_producto_ref].dropna()
 
-                    # Referencia relajada:
+                    # Referencia relajada por grado:
                     # si los filtros estrictos dejan pocos puntos para un grado,
-                    # usamos presión normal + rendimiento válido + producto válido.
-                    # Esto evita que grados como XSD6601K, LYD6200K o WSD6601K
-                    # queden sin calibración y el modelo extrapole.
-                    if bool(_usar_fallback_historico_producto):
-                        # Fallback opcional: usar histórico no excluido.
-                        # Para diagnóstico de contaminantes, mantener desactivado salvo que falten datos.
-                        _mask_producto_ref_relajada = (
-                            _presion_ok
-                            & _rendimiento.notna()
-                            & (~_evento_excluido_producto)
-                            & _producto_norm_all.notna()
-                        )
-                    else:
-                        # Sin fallback: la referencia relajada sigue siendo post cambio de lecho.
-                        _mask_producto_ref_relajada = (
-                            _periodo_referencia_sana
-                            & _rendimiento.notna()
-                            & _producto_norm_all.notna()
-                        )
+                    # usamos histórico válido por variables críticas:
+                    # presión normal + rendimiento válido + producto válido,
+                    # respetando exclusiones de datos no confiables.
+                    #
+                    # Importante: no depende del cambio de lecho.
+                    _mask_producto_ref_relajada = (
+                        _periodo_referencia_sana
+                        & _rendimiento.notna()
+                        & _producto_norm_all.notna()
+                    )
 
                     _df_prod_ref_relajada = pd.DataFrame(
                         {
