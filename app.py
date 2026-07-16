@@ -2112,12 +2112,31 @@ if unidad.startswith("Polimer") and all(
                             pd.DataFrame(),
                         )
 
+                        st.markdown("**Criterio de benchmark por grado**")
+                        _percentil_ref_local_edit = st.number_input(
+                            "Percentil referencia local",
+                            min_value=0.50,
+                            max_value=0.95,
+                            value=0.85,
+                            step=0.05,
+                            format="%.2f",
+                            key="percentil_ref_local_grado_modelo",
+                            help=(
+                                "Percentil de rendimiento real usado entre vecinos históricos del mismo grado "
+                                "con condiciones similares. 0.85 equivale a P85. "
+                                "Subirlo hace el estimado más exigente; bajarlo lo acerca al promedio."
+                            ),
+                        )
+                        st.caption(
+                            "El rendimiento estimado se interpreta como benchmark esperado/bueno, "
+                            "no como promedio histórico. Por eso se usa una referencia local alta del mismo grado."
+                        )
+
                         if isinstance(_ref_local_df_visible, pd.DataFrame) and len(_ref_local_df_visible) > 0:
                             with st.expander("Ver referencia local por grado", expanded=False):
                                 st.caption(
-                                    "Ref_local es el percentil 75 de puntos del mismo grado con condiciones de proceso similares. "
-                                    "Se usa un percentil alto porque el estimado busca representar operación esperada/buena, "
-                                    "no el promedio bajo de campañas con problemas. Sirve para revisar casos como KYD6110 alto real o grados sobreestimados."
+                                    "Ref_local usa el percentil configurado de puntos del mismo grado con condiciones de proceso similares. "
+                                    "Sirve para revisar casos subestimados como KYD6110/RFD6140K y grados sobreestimados."
                                 )
                                 st.dataframe(
                                     _ref_local_df_visible.round(3),
@@ -2422,7 +2441,7 @@ if unidad.startswith("Polimer") and all(
                     # subestima casos altos reales como KYD6110. En su lugar:
                     # - se buscan vecinos históricos del mismo grado con variables
                     #   de proceso similares,
-                    # - se usa el P75 de esos vecinos como referencia local,
+                    # - se usa el percentil configurable de esos vecinos como referencia local,
                     # - se combina con el modelo,
                     # - y finalmente se aplica la banda de plausibilidad.
                     if "Producto" in df_agrup.columns and isinstance(_producto_stats, dict) and len(_producto_stats) > 0:
@@ -2497,35 +2516,46 @@ if unidad.startswith("Polimer") and all(
 
                                         if _n_vecinos >= 3:
                                             # Referencia buena pero no extrema para condiciones similares.
-                                            _ref_local = float(_y_nn_local.quantile(0.75))
+                                            # Se usa el percentil configurable del panel del modelo.
+                                            _ref_local = float(
+                                                _y_nn_local.quantile(float(_percentil_ref_local_edit))
+                                            )
 
                                 except Exception:
                                     _ref_local = np.nan
                                     _n_vecinos = 0
 
                             if np.isfinite(_ref_local):
+                                # Si hay vecinos del mismo grado, confiar fuerte en esa
+                                # referencia local porque representa campañas comparables.
                                 if _n_vecinos >= 8:
-                                    _peso_modelo_grado = 0.20
+                                    _peso_modelo_grado = 0.10
                                 else:
-                                    _peso_modelo_grado = 0.30
+                                    _peso_modelo_grado = 0.20
 
                                 _pred_blend = (
                                     _peso_modelo_grado * _pred_actual
                                     + (1.0 - _peso_modelo_grado) * _ref_local
                                 )
                             else:
-                                # Sin referencia local: corrección suave a mediana,
-                                # menos agresiva que antes.
+                                # Sin referencia local suficiente, no tirar a la mediana pura:
+                                # usar una referencia histórica alta del grado.
+                                _q90_prod = float(_stat_prod.get("q90", _med_prod))
+                                _ref_grado_alta = (
+                                    0.35 * _med_prod
+                                    + 0.65 * _q90_prod
+                                )
+
                                 if _n_prod >= 8:
-                                    _peso_modelo_grado = 0.80
+                                    _peso_modelo_grado = 0.45
                                 elif _n_prod >= 4:
-                                    _peso_modelo_grado = 0.85
+                                    _peso_modelo_grado = 0.55
                                 else:
-                                    _peso_modelo_grado = 0.90
+                                    _peso_modelo_grado = 0.65
 
                                 _pred_blend = (
                                     _peso_modelo_grado * _pred_actual
-                                    + (1.0 - _peso_modelo_grado) * _med_prod
+                                    + (1.0 - _peso_modelo_grado) * _ref_grado_alta
                                 )
 
                             _pred_corregida_producto[_i_pred] = np.clip(
@@ -2540,6 +2570,7 @@ if unidad.startswith("Polimer") and all(
                                     "Fecha": df_agrup.loc[_idx_pred_actual, "Fecha_y_hora"] if "Fecha_y_hora" in df_agrup.columns else _idx_pred_actual,
                                     "Pred_modelo": _pred_actual,
                                     "Ref_local": _ref_local,
+                                    "Percentil_ref": float(_percentil_ref_local_edit),
                                     "n_vecinos": _n_vecinos,
                                     "Mediana_grado": _med_prod,
                                     "Pred_corregida": float(_pred_corregida_producto[_i_pred]),
