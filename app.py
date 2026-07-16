@@ -2132,6 +2132,60 @@ if unidad.startswith("Polimer") and all(
                             "no como promedio histórico. Por eso se usa una referencia local alta del mismo grado."
                         )
 
+                        st.markdown("**Corrección por campaña**")
+                        _usar_correccion_campania = st.checkbox(
+                            "Ajustar sesgo de campaña actual",
+                            value=True,
+                            key="usar_correccion_campania_modelo",
+                            help=(
+                                "Si una campaña completa de un grado viene sistemáticamente por debajo "
+                                "o por encima del estimado, aplica una corrección limitada. "
+                                "Sirve para grados como XSD6601K cuando el benchmark local queda alto "
+                                "respecto a la campaña real."
+                            ),
+                        )
+
+                        c_corr_camp_1, c_corr_camp_2 = st.columns(2)
+                        with c_corr_camp_1:
+                            _peso_correccion_campania = st.number_input(
+                                "Peso campaña",
+                                min_value=0.00,
+                                max_value=1.00,
+                                value=0.70,
+                                step=0.05,
+                                format="%.2f",
+                                key="peso_correccion_campania_modelo",
+                                help="Fracción del sesgo mediano de la campaña que se aplica al estimado.",
+                            )
+                        with c_corr_camp_2:
+                            _limite_correccion_campania = st.number_input(
+                                "Límite campaña",
+                                min_value=0.00,
+                                max_value=5.00,
+                                value=1.50,
+                                step=0.10,
+                                format="%.2f",
+                                key="limite_correccion_campania_modelo",
+                                help="Máxima corrección absoluta permitida por campaña.",
+                            )
+
+                        _campania_bias_df_visible = st.session_state.get(
+                            "campania_bias_df_modelo",
+                            pd.DataFrame(),
+                        )
+
+                        if isinstance(_campania_bias_df_visible, pd.DataFrame) and len(_campania_bias_df_visible) > 0:
+                            with st.expander("Ver corrección por campaña", expanded=False):
+                                st.caption(
+                                    "Bias_campania = mediana(real - estimado) dentro de una campaña continua del mismo grado. "
+                                    "Se aplica limitado por el valor 'Límite campaña'."
+                                )
+                                st.dataframe(
+                                    _campania_bias_df_visible.round(3),
+                                    width="stretch",
+                                    hide_index=True,
+                                )
+
                         if isinstance(_ref_local_df_visible, pd.DataFrame) and len(_ref_local_df_visible) > 0:
                             with st.expander("Ver referencia local por grado", expanded=False):
                                 st.caption(
@@ -2585,6 +2639,110 @@ if unidad.startswith("Polimer") and all(
                             st.session_state["producto_ref_local_df_modelo"] = pd.DataFrame(_filas_local_ref)
                         except Exception:
                             pass
+
+                    # Corrección por campaña continua del mismo grado.
+                    #
+                    # Si una campaña completa queda sistemáticamente por debajo/arriba
+                    # del estimado, se aplica una corrección limitada. Esto captura
+                    # efectos no incluidos en las variables del modelo o problemas de
+                    # clasificación de transición, sin cambiar la lógica general por grado.
+                    try:
+                        _campania_bias_df = pd.DataFrame()
+
+                        if (
+                            bool(_usar_correccion_campania)
+                            and "Producto" in df_agrup.columns
+                            and "Fecha_y_hora" in df_agrup.columns
+                            and len(_idx_all) > 0
+                        ):
+                            _df_camp = pd.DataFrame(
+                                {
+                                    "Fecha_y_hora": pd.to_datetime(
+                                        df_agrup.loc[_idx_all, "Fecha_y_hora"],
+                                        errors="coerce",
+                                    ),
+                                    "Producto_norm": (
+                                        df_agrup.loc[_idx_all, "Producto"]
+                                        .astype("string")
+                                        .map(normalizar_producto_operativo)
+                                    ),
+                                    "Real": pd.to_numeric(
+                                        _rendimiento.loc[_idx_all],
+                                        errors="coerce",
+                                    ),
+                                    "Estimado_pre_campania": _pred,
+                                },
+                                index=_idx_all,
+                            ).dropna(subset=["Fecha_y_hora", "Producto_norm"])
+
+                            _df_camp = _df_camp.sort_values("Fecha_y_hora")
+
+                            _gap = _df_camp["Fecha_y_hora"].diff()
+                            _cambio_producto = (
+                                _df_camp["Producto_norm"].astype(str)
+                                != _df_camp["Producto_norm"].astype(str).shift()
+                            )
+
+                            # Separar campañas si hay cambio de producto o gap grande.
+                            _corte_gap = _gap > pd.Timedelta(days=14)
+                            _df_camp["Campania_id"] = (
+                                (_cambio_producto | _corte_gap.fillna(False))
+                                .cumsum()
+                            )
+
+                            _pred_camp_corr = pd.Series(_pred, index=_idx_all, dtype=float)
+                            _filas_campania = []
+
+                            for _camp_id, _grp_camp in _df_camp.groupby("Campania_id"):
+                                _grp_valid = _grp_camp.dropna(subset=["Real", "Estimado_pre_campania"])
+
+                                if len(_grp_valid) < 3:
+                                    continue
+
+                                _resid_camp = (
+                                    pd.to_numeric(_grp_valid["Real"], errors="coerce")
+                                    - pd.to_numeric(_grp_valid["Estimado_pre_campania"], errors="coerce")
+                                ).dropna()
+
+                                if len(_resid_camp) < 3:
+                                    continue
+
+                                _bias_camp = float(_resid_camp.median())
+                                _correccion_camp = float(
+                                    np.clip(
+                                        _bias_camp * float(_peso_correccion_campania),
+                                        -float(_limite_correccion_campania),
+                                        float(_limite_correccion_campania),
+                                    )
+                                )
+
+                                _idx_camp = _grp_camp.index
+                                _pred_camp_corr.loc[_idx_camp] = (
+                                    _pred_camp_corr.loc[_idx_camp]
+                                    + _correccion_camp
+                                )
+
+                                _filas_campania.append(
+                                    {
+                                        "Producto": str(_grp_camp["Producto_norm"].iloc[0]),
+                                        "Desde": _grp_camp["Fecha_y_hora"].min(),
+                                        "Hasta": _grp_camp["Fecha_y_hora"].max(),
+                                        "n": int(len(_grp_valid)),
+                                        "Bias_campania": _bias_camp,
+                                        "Correccion_aplicada": _correccion_camp,
+                                    }
+                                )
+
+                            _pred = _pred_camp_corr.loc[_idx_all].to_numpy(dtype=float)
+
+                            if _filas_campania:
+                                _campania_bias_df = pd.DataFrame(_filas_campania)
+
+                        st.session_state["campania_bias_df_modelo"] = _campania_bias_df
+
+                    except Exception:
+                        # La corrección por campaña es auxiliar y no debe romper el modelo.
+                        pass
 
                     # Evitar extrapolaciones absurdas globales: permitir margen alrededor
                     # del rango de la base, pero no valores físicamente irreales.
