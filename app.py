@@ -1661,10 +1661,12 @@ if unidad.startswith("Polimer") and all(
                     _n_sin_donor_base = int(_sin_donor_base.sum())
 
                     # Referencia específica solicitada:
-                    # KFM6110 sin C-Donor de fines de 2025 (noviembre/diciembre).
+                    # KFM6110 sin C-Donor de abril/mayo 2026.
+                    # Esta referencia se usa para corregir la estimación de KFM,
+                    # sin volver a meter PRODUCTO como variable de correlación.
                     _fin_2025_mask = (
-                        (_fecha >= pd.Timestamp("2025-11-01"))
-                        & (_fecha <= pd.Timestamp("2025-12-31 23:59:59"))
+                        (_fecha >= pd.Timestamp("2026-04-01"))
+                        & (_fecha <= pd.Timestamp("2026-05-31 23:59:59"))
                     )
 
                     _sin_donor_mask = (
@@ -1729,12 +1731,12 @@ if unidad.startswith("Polimer") and all(
                     _n_sin_donor_kfm_fin2025 = int(len(_y_sin_donor_kfm_fin2025))
 
                     if _n_sin_donor_kfm_fin2025 >= 2:
-                        # Mediana robusta del KFM6110 sin donor de nov/dic-2025.
+                        # Mediana robusta del KFM6110 sin donor de abr/may-2026.
                         _ref_sin_donor_kfm_fin2025 = float(_y_sin_donor_kfm_fin2025.median())
-                        _fuente_ref_sin_donor = "KFM6110 sin C-Donor nov/dic-2025"
+                        _fuente_ref_sin_donor = "KFM6110 sin C-Donor abr/may-2026"
 
                     # Fallback: referencia histórica confiable sin donor.
-                    # Se usa solo si no hay suficientes puntos KFM nov/dic-2025.
+                    # Se usa solo si no hay suficientes puntos KFM abr/may-2026.
                     _evento_excluido_hist = (
                         (_fecha >= pd.Timestamp("2024-11-01"))
                         & (_fecha <= pd.Timestamp("2025-04-30 23:59:59"))
@@ -1794,7 +1796,7 @@ if unidad.startswith("Polimer") and all(
                         st.caption(
                             "Modelo lineal entrenado con dic-25 a feb-26. "
                             "Los coeficientes se aplican sobre variables estandarizadas. "
-                            "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se usa una referencia KFM6110 sin donor nov/dic-2025."
+                            "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se usa una referencia KFM6110 sin donor abr/may-2026."
                         )
 
                         st.markdown("**Diagnóstico del modelo**")
@@ -1806,19 +1808,19 @@ if unidad.startswith("Polimer") and all(
 
                         c_diag_3, c_diag_4 = st.columns(2)
                         with c_diag_3:
-                            st.metric("KFM nov/dic-25 sin donor", _n_sin_donor_kfm_fin2025)
+                            st.metric("KFM abr/may-26 sin donor", _n_sin_donor_kfm_fin2025)
                         with c_diag_4:
                             st.metric("Histórico sin donor", _n_sin_donor_hist)
 
                         if _n_sin_donor_kfm_fin2025 < 2:
                             st.warning(
-                                "No hay suficientes puntos KFM6110 sin C-Donor en nov/dic-2025. "
+                                "No hay suficientes puntos KFM6110 sin C-Donor en abr/may-2026. "
                                 "La app usará el fallback histórico sin donor o P90 del período base."
                             )
                         elif _n_sin_donor_base < 3:
                             st.info(
                                 "El período base dic-25/feb-26 tiene pocos puntos sin C-Donor. "
-                                "Para KFM se usa la referencia específica de nov/dic-2025."
+                                "Para KFM se usa la referencia específica de abr/may-2026."
                             )
 
                         if np.isfinite(_ref_sin_donor_kfm_fin2025):
@@ -1833,10 +1835,10 @@ if unidad.startswith("Polimer") and all(
                             value=float(_default_ref_sin_donor),
                             step=0.10,
                             format="%.4f",
-                            key="ref_sin_donor_kfm_fin_2025_modelo",
+                            key="ref_sin_donor_kfm_abr_may_2026_modelo",
                             help=(
                                 "Valor mínimo razonable para campañas sin C-Donor. "
-                                "Se inicializa con KFM6110 sin C-Donor de nov/dic-2025. "
+                                "Se inicializa con KFM6110 sin C-Donor de abr/may-2026. "
                                 "Si no alcanza, usa histórico sin donor o P90 del período base."
                             ),
                         )
@@ -1844,7 +1846,7 @@ if unidad.startswith("Polimer") and all(
                         st.caption(
                             "Fuente referencia sin donor: "
                             f"{_fuente_ref_sin_donor}. "
-                            "Esta corrección usa PRODUCTO solo para seleccionar la referencia KFM6110 nov/dic-2025; "
+                            "Esta corrección usa PRODUCTO solo para seleccionar la referencia KFM6110 abr/may-2026; "
                             "PRODUCTO no entra como variable de correlación."
                         )
 
