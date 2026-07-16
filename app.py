@@ -2115,8 +2115,9 @@ if unidad.startswith("Polimer") and all(
                         if isinstance(_ref_local_df_visible, pd.DataFrame) and len(_ref_local_df_visible) > 0:
                             with st.expander("Ver referencia local por grado", expanded=False):
                                 st.caption(
-                                    "Ref_local es el percentil 60 de puntos del mismo grado con condiciones de proceso similares. "
-                                    "Sirve para revisar casos como KYD6110 alto real o grados sobreestimados."
+                                    "Ref_local es el percentil 75 de puntos del mismo grado con condiciones de proceso similares. "
+                                    "Se usa un percentil alto porque el estimado busca representar operación esperada/buena, "
+                                    "no el promedio bajo de campañas con problemas. Sirve para revisar casos como KYD6110 alto real o grados sobreestimados."
                                 )
                                 st.dataframe(
                                     _ref_local_df_visible.round(3),
@@ -2421,7 +2422,7 @@ if unidad.startswith("Polimer") and all(
                     # subestima casos altos reales como KYD6110. En su lugar:
                     # - se buscan vecinos históricos del mismo grado con variables
                     #   de proceso similares,
-                    # - se usa el P60 de esos vecinos como referencia local,
+                    # - se usa el P75 de esos vecinos como referencia local,
                     # - se combina con el modelo,
                     # - y finalmente se aplica la banda de plausibilidad.
                     if "Producto" in df_agrup.columns and isinstance(_producto_stats, dict) and len(_producto_stats) > 0:
@@ -2496,7 +2497,7 @@ if unidad.startswith("Polimer") and all(
 
                                         if _n_vecinos >= 3:
                                             # Referencia buena pero no extrema para condiciones similares.
-                                            _ref_local = float(_y_nn_local.quantile(0.60))
+                                            _ref_local = float(_y_nn_local.quantile(0.75))
 
                                 except Exception:
                                     _ref_local = np.nan
@@ -2504,9 +2505,9 @@ if unidad.startswith("Polimer") and all(
 
                             if np.isfinite(_ref_local):
                                 if _n_vecinos >= 8:
-                                    _peso_modelo_grado = 0.35
+                                    _peso_modelo_grado = 0.20
                                 else:
-                                    _peso_modelo_grado = 0.45
+                                    _peso_modelo_grado = 0.30
 
                                 _pred_blend = (
                                     _peso_modelo_grado * _pred_actual
@@ -2516,11 +2517,11 @@ if unidad.startswith("Polimer") and all(
                                 # Sin referencia local: corrección suave a mediana,
                                 # menos agresiva que antes.
                                 if _n_prod >= 8:
-                                    _peso_modelo_grado = 0.70
+                                    _peso_modelo_grado = 0.80
                                 elif _n_prod >= 4:
-                                    _peso_modelo_grado = 0.75
-                                else:
                                     _peso_modelo_grado = 0.85
+                                else:
+                                    _peso_modelo_grado = 0.90
 
                                 _pred_blend = (
                                     _peso_modelo_grado * _pred_actual
