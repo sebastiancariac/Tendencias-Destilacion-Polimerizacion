@@ -2017,6 +2017,23 @@ if unidad.startswith("Polimer") and all(
                                     hide_index=True,
                                 )
 
+                        _bias_df_visible = st.session_state.get(
+                            "producto_bias_df_modelo",
+                            pd.DataFrame(),
+                        )
+
+                        if isinstance(_bias_df_visible, pd.DataFrame) and len(_bias_df_visible) > 0:
+                            with st.expander("Ver corrección de sesgo por grado", expanded=False):
+                                st.caption(
+                                    "Bias_aplicado se suma al modelo para corregir sub/sobreestimación sistemática de cada grado. "
+                                    "Ejemplo: si SMD6200 quedaba subestimado, este valor debería ser positivo."
+                                )
+                                st.dataframe(
+                                    _bias_df_visible.round(3),
+                                    width="stretch",
+                                    hide_index=True,
+                                )
+
                         _feature_labels_modelo = {
                             "Conc_H2": "Concentración H2",
                             "Conc_propano": "Concentración propano",
@@ -2146,6 +2163,119 @@ if unidad.startswith("Polimer") and all(
                     _x_all_design = np.column_stack([np.ones(len(_x_all_std)), _x_all_std])
 
                     _pred = _x_all_design @ _beta
+
+                    # Corrección de sesgo por grado/producto normalizado.
+                    #
+                    # Problema observado:
+                    # - Para SMD6200 el modelo quedaba subestimado.
+                    # - Para otros grados podía extrapolar demasiado alto.
+                    #
+                    # Criterio:
+                    # - PRODUCTO no entra como variable de la ecuación lineal.
+                    # - Pero se usa para calibrar el sesgo histórico del modelo:
+                    #       sesgo_grado = mediana(Rendimiento real - Rendimiento modelo)
+                    #   calculado con datos confiables del mismo grado.
+                    # - Luego se suma ese sesgo a la predicción del grado.
+                    # - Después siguen aplicándose las bandas históricas por grado.
+                    if (
+                        "Producto" in df_agrup.columns
+                        and "_producto_norm_all" in locals()
+                        and "_mask_producto_ref" in locals()
+                    ):
+                        try:
+                            _pred_series_base = pd.Series(_pred, index=_idx_all)
+                            _producto_bias = {}
+                            _filas_bias = []
+
+                            _idx_bias_ref = df_agrup.index[
+                                _mask_producto_ref
+                                & df_agrup.index.isin(_idx_all)
+                            ]
+
+                            if len(_idx_bias_ref) > 0:
+                                _resid_ref = (
+                                    _rendimiento.loc[_idx_bias_ref]
+                                    - _pred_series_base.loc[_idx_bias_ref]
+                                )
+
+                                _df_bias = pd.DataFrame(
+                                    {
+                                        "Producto_norm": _producto_norm_all.loc[_idx_bias_ref],
+                                        "Residual": _resid_ref,
+                                    },
+                                    index=_idx_bias_ref,
+                                ).dropna()
+
+                                for _prod_bias, _grp_bias in _df_bias.groupby("Producto_norm"):
+                                    _r = pd.to_numeric(_grp_bias["Residual"], errors="coerce").dropna()
+
+                                    if len(_r) < 3:
+                                        continue
+
+                                    _bias_raw = float(_r.median())
+
+                                    # Peso por cantidad de datos: evita sobrecorregir grados con poco histórico.
+                                    _peso_n = min(1.0, float(len(_r)) / 8.0)
+
+                                    # Limitar la corrección para no convertir el grado en un target fijo.
+                                    _bias_corr = float(np.clip(_bias_raw * _peso_n, -2.5, 2.5))
+
+                                    _producto_bias[str(_prod_bias)] = {
+                                        "bias": _bias_corr,
+                                        "n": int(len(_r)),
+                                        "bias_raw": _bias_raw,
+                                    }
+
+                                    _filas_bias.append(
+                                        {
+                                            "Producto": str(_prod_bias),
+                                            "n_bias": int(len(_r)),
+                                            "Bias_raw": _bias_raw,
+                                            "Bias_aplicado": _bias_corr,
+                                        }
+                                    )
+
+                                if len(_producto_bias) > 0:
+                                    _producto_pred_bias = (
+                                        df_agrup.loc[_idx_all, "Producto"]
+                                        .astype("string")
+                                        .map(normalizar_producto_operativo)
+                                    )
+
+                                    _pred_bias = _pred.copy()
+
+                                    for _i_bias, _prod_pred_bias in enumerate(_producto_pred_bias):
+                                        if pd.isna(_prod_pred_bias):
+                                            continue
+
+                                        _bias_info = _producto_bias.get(str(_prod_pred_bias))
+
+                                        if not _bias_info:
+                                            continue
+
+                                        _pred_bias[_i_bias] = (
+                                            _pred_bias[_i_bias]
+                                            + float(_bias_info["bias"])
+                                        )
+
+                                    _pred = _pred_bias
+
+                                    # Guardar tabla diagnóstica para mostrarla si el usuario abre el modelo.
+                                    _producto_bias_df = pd.DataFrame(_filas_bias).sort_values("Producto")
+                                else:
+                                    _producto_bias_df = pd.DataFrame()
+
+                        except Exception:
+                            # La corrección por grado es auxiliar. Si algo cambia en el Excel,
+                            # no debe romper la app ni el modelo principal.
+                            _producto_bias_df = pd.DataFrame()
+                    else:
+                        _producto_bias_df = pd.DataFrame()
+
+                    try:
+                        st.session_state["producto_bias_df_modelo"] = _producto_bias_df
+                    except Exception:
+                        pass
 
                     # Campañas sin C-Donor:
                     # si el período base no contiene suficientes ejemplos sin donor,
