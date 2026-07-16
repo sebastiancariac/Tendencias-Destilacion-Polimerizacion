@@ -2151,23 +2151,37 @@ if unidad.startswith("Polimer") and all(
                                 "Peso campaña",
                                 min_value=0.00,
                                 max_value=1.00,
-                                value=0.70,
+                                value=0.85,
                                 step=0.05,
                                 format="%.2f",
                                 key="peso_correccion_campania_modelo",
-                                help="Fracción del sesgo mediano de la campaña que se aplica al estimado.",
+                                help="Fracción del sesgo mediano de la campaña/local que se aplica al estimado.",
                             )
                         with c_corr_camp_2:
                             _limite_correccion_campania = st.number_input(
                                 "Límite campaña",
                                 min_value=0.00,
                                 max_value=5.00,
-                                value=1.50,
+                                value=2.50,
                                 step=0.10,
                                 format="%.2f",
                                 key="limite_correccion_campania_modelo",
                                 help="Máxima corrección absoluta permitida por campaña.",
                             )
+
+                        _ventana_correccion_campania = st.number_input(
+                            "Ventana local campaña [días]",
+                            min_value=3,
+                            max_value=45,
+                            value=10,
+                            step=1,
+                            key="ventana_correccion_campania_modelo",
+                            help=(
+                                "Para cada punto, calcula el sesgo local usando puntos cercanos "
+                                "de la misma campaña. Si no hay suficientes puntos, usa el sesgo "
+                                "mediano de toda la campaña."
+                            ),
+                        )
 
                         _campania_bias_df_visible = st.session_state.get(
                             "campania_bias_df_modelo",
@@ -2642,10 +2656,11 @@ if unidad.startswith("Polimer") and all(
 
                     # Corrección por campaña continua del mismo grado.
                     #
-                    # Si una campaña completa queda sistemáticamente por debajo/arriba
-                    # del estimado, se aplica una corrección limitada. Esto captura
-                    # efectos no incluidos en las variables del modelo o problemas de
-                    # clasificación de transición, sin cambiar la lógica general por grado.
+                    # Si una campaña queda sistemáticamente por debajo/arriba del
+                    # estimado, se aplica una corrección limitada. Para evitar que una
+                    # campaña larga mezcle zonas con comportamiento distinto, primero
+                    # se calcula un sesgo local en una ventana de días; si no hay
+                    # puntos suficientes, se usa el sesgo mediano de toda la campaña.
                     try:
                         _campania_bias_df = pd.DataFrame()
 
@@ -2684,7 +2699,9 @@ if unidad.startswith("Polimer") and all(
                             )
 
                             # Separar campañas si hay cambio de producto o gap grande.
-                            _corte_gap = _gap > pd.Timedelta(days=14)
+                            # Se baja el corte a 10 días para no mezclar campañas separadas
+                            # que tengan el mismo grado pero distinta condición operativa.
+                            _corte_gap = _gap > pd.Timedelta(days=10)
                             _df_camp["Campania_id"] = (
                                 (_cambio_producto | _corte_gap.fillna(False))
                                 .cumsum()
@@ -2693,34 +2710,75 @@ if unidad.startswith("Polimer") and all(
                             _pred_camp_corr = pd.Series(_pred, index=_idx_all, dtype=float)
                             _filas_campania = []
 
+                            _ventana_dias = int(_ventana_correccion_campania)
+                            _ventana_td = pd.Timedelta(days=_ventana_dias)
+                            _peso_camp = float(_peso_correccion_campania)
+                            _lim_camp = float(_limite_correccion_campania)
+
                             for _camp_id, _grp_camp in _df_camp.groupby("Campania_id"):
-                                _grp_valid = _grp_camp.dropna(subset=["Real", "Estimado_pre_campania"])
+                                _grp_valid = _grp_camp.dropna(
+                                    subset=["Real", "Estimado_pre_campania"]
+                                ).copy()
 
                                 if len(_grp_valid) < 3:
                                     continue
 
-                                _resid_camp = (
+                                _grp_valid["Residual"] = (
                                     pd.to_numeric(_grp_valid["Real"], errors="coerce")
                                     - pd.to_numeric(_grp_valid["Estimado_pre_campania"], errors="coerce")
-                                ).dropna()
+                                )
 
-                                if len(_resid_camp) < 3:
+                                _grp_valid = _grp_valid.dropna(subset=["Residual"])
+
+                                if len(_grp_valid) < 3:
                                     continue
 
-                                _bias_camp = float(_resid_camp.median())
-                                _correccion_camp = float(
-                                    np.clip(
-                                        _bias_camp * float(_peso_correccion_campania),
-                                        -float(_limite_correccion_campania),
-                                        float(_limite_correccion_campania),
-                                    )
-                                )
+                                _bias_camp = float(_grp_valid["Residual"].median())
 
-                                _idx_camp = _grp_camp.index
-                                _pred_camp_corr.loc[_idx_camp] = (
-                                    _pred_camp_corr.loc[_idx_camp]
-                                    + _correccion_camp
-                                )
+                                _correcciones_punto = []
+
+                                for _idx_punto, _fila_punto in _grp_valid.iterrows():
+                                    _fecha_punto = _fila_punto["Fecha_y_hora"]
+
+                                    _mask_local = (
+                                        (_grp_valid["Fecha_y_hora"] >= (_fecha_punto - _ventana_td))
+                                        & (_grp_valid["Fecha_y_hora"] <= (_fecha_punto + _ventana_td))
+                                    )
+
+                                    _resid_local = _grp_valid.loc[_mask_local, "Residual"].dropna()
+
+                                    if len(_resid_local) >= 3:
+                                        _bias_usado = float(_resid_local.median())
+                                        _tipo_bias = "local"
+                                        _n_bias = int(len(_resid_local))
+                                    else:
+                                        _bias_usado = _bias_camp
+                                        _tipo_bias = "campaña"
+                                        _n_bias = int(len(_grp_valid))
+
+                                    _correccion_punto = float(
+                                        np.clip(
+                                            _bias_usado * _peso_camp,
+                                            -_lim_camp,
+                                            _lim_camp,
+                                        )
+                                    )
+
+                                    _pred_camp_corr.loc[_idx_punto] = (
+                                        _pred_camp_corr.loc[_idx_punto]
+                                        + _correccion_punto
+                                    )
+
+                                    _correcciones_punto.append(
+                                        {
+                                            "Correccion": _correccion_punto,
+                                            "Bias_usado": _bias_usado,
+                                            "Tipo_bias": _tipo_bias,
+                                            "n_bias": _n_bias,
+                                        }
+                                    )
+
+                                _corr_df = pd.DataFrame(_correcciones_punto)
 
                                 _filas_campania.append(
                                     {
@@ -2729,7 +2787,11 @@ if unidad.startswith("Polimer") and all(
                                         "Hasta": _grp_camp["Fecha_y_hora"].max(),
                                         "n": int(len(_grp_valid)),
                                         "Bias_campania": _bias_camp,
-                                        "Correccion_aplicada": _correccion_camp,
+                                        "Correccion_mediana": float(_corr_df["Correccion"].median()) if len(_corr_df) else np.nan,
+                                        "Correccion_min": float(_corr_df["Correccion"].min()) if len(_corr_df) else np.nan,
+                                        "Correccion_max": float(_corr_df["Correccion"].max()) if len(_corr_df) else np.nan,
+                                        "Ventana_dias": _ventana_dias,
+                                        "Uso_local_%": float((_corr_df["Tipo_bias"].eq("local").mean() * 100.0)) if len(_corr_df) else 0.0,
                                     }
                                 )
 
