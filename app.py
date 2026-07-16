@@ -1832,7 +1832,7 @@ if unidad.startswith("Polimer") and all(
                         _slurry_prod = pd.to_numeric(df_agrup["Slurry"], errors="coerce")
                         _mask_producto_ref = _mask_producto_ref & (_slurry_prod > 50.0)
 
-                    _df_prod_ref = pd.DataFrame(
+                    _df_prod_ref_estricta = pd.DataFrame(
                         {
                             "Producto_norm": _producto_norm_all,
                             "Rendimiento": _rendimiento,
@@ -1840,10 +1840,60 @@ if unidad.startswith("Polimer") and all(
                         index=df_agrup.index,
                     ).loc[_mask_producto_ref].dropna()
 
+                    # Referencia relajada:
+                    # si los filtros estrictos dejan pocos puntos para un grado,
+                    # usamos presión normal + rendimiento válido + producto válido.
+                    # Esto evita que grados como XSD6601K, LYD6200K o WSD6601K
+                    # queden sin calibración y el modelo extrapole.
+                    _mask_producto_ref_relajada = (
+                        _presion_ok
+                        & _rendimiento.notna()
+                        & (~_evento_excluido_producto)
+                        & _producto_norm_all.notna()
+                    )
+
+                    _df_prod_ref_relajada = pd.DataFrame(
+                        {
+                            "Producto_norm": _producto_norm_all,
+                            "Rendimiento": _rendimiento,
+                        },
+                        index=df_agrup.index,
+                    ).loc[_mask_producto_ref_relajada].dropna()
+
+                    # Máscara disponible para la corrección de sesgo posterior.
+                    _mask_producto_bias_ref = _mask_producto_ref_relajada.copy()
+
                     _filas_prod_stats = []
 
-                    for _prod, _grp in _df_prod_ref.groupby("Producto_norm"):
-                        _y_prod = pd.to_numeric(_grp["Rendimiento"], errors="coerce").dropna()
+                    _productos_ref = sorted(
+                        set(_df_prod_ref_estricta["Producto_norm"].astype(str).unique()).union(
+                            set(_df_prod_ref_relajada["Producto_norm"].astype(str).unique())
+                        )
+                    )
+
+                    for _prod in _productos_ref:
+                        _y_prod_estricta = pd.to_numeric(
+                            _df_prod_ref_estricta.loc[
+                                _df_prod_ref_estricta["Producto_norm"].astype(str).eq(str(_prod)),
+                                "Rendimiento",
+                            ],
+                            errors="coerce",
+                        ).dropna()
+
+                        _y_prod_relajada = pd.to_numeric(
+                            _df_prod_ref_relajada.loc[
+                                _df_prod_ref_relajada["Producto_norm"].astype(str).eq(str(_prod)),
+                                "Rendimiento",
+                            ],
+                            errors="coerce",
+                        ).dropna()
+
+                        if len(_y_prod_estricta) >= 3:
+                            _y_prod = _y_prod_estricta
+                            _fuente_prod = "estricta"
+                        else:
+                            _y_prod = _y_prod_relajada
+                            _fuente_prod = "relajada"
 
                         if len(_y_prod) < 2:
                             continue
@@ -1855,19 +1905,32 @@ if unidad.startswith("Polimer") and all(
                         _q90_prod = float(_y_prod.quantile(0.90))
                         _iqr_prod = max(_q75_prod - _q25_prod, 0.0)
 
-                        # Banda robusta. Se permite algo de movimiento respecto al histórico,
-                        # pero no picos incompatibles con el grado.
-                        _margen_prod = max(0.75, 0.35 * _iqr_prod)
+                        # Banda robusta. Para n bajo, se usa una banda más conservadora
+                        # alrededor de la mediana del grado.
+                        if len(_y_prod) < 5:
+                            _margen_prod = max(1.00, 0.25 * _iqr_prod)
+                            _lim_inf_prod = _med_prod - max(1.25, _margen_prod)
+                            _lim_sup_prod = _med_prod + max(1.25, _margen_prod)
+                        else:
+                            _margen_prod = max(0.65, 0.30 * _iqr_prod)
+                            _lim_inf_prod = min(_q10_prod - _margen_prod, _med_prod - 0.65)
+                            _lim_sup_prod = max(_q90_prod + _margen_prod, _med_prod + 0.65)
 
-                        _lim_inf_prod = min(_q10_prod - _margen_prod, _med_prod - 0.75)
-                        _lim_sup_prod = max(_q90_prod + _margen_prod, _med_prod + 0.75)
-
-                        # Límite adicional para que un outlier histórico no abra demasiado la banda.
-                        _lim_sup_prod = min(_lim_sup_prod, _med_prod + max(2.0, 2.0 * _iqr_prod + 0.75))
-                        _lim_inf_prod = max(_lim_inf_prod, _med_prod - max(2.0, 2.0 * _iqr_prod + 0.75))
+                        # Límite adicional para que outliers históricos no abran demasiado la banda.
+                        _lim_sup_prod = min(
+                            _lim_sup_prod,
+                            _med_prod + max(1.75, 1.50 * _iqr_prod + 0.50),
+                        )
+                        _lim_inf_prod = max(
+                            _lim_inf_prod,
+                            _med_prod - max(1.75, 1.50 * _iqr_prod + 0.50),
+                        )
 
                         _producto_stats[str(_prod)] = {
                             "n": int(len(_y_prod)),
+                            "n_estricto": int(len(_y_prod_estricta)),
+                            "n_relajado": int(len(_y_prod_relajada)),
+                            "fuente": _fuente_prod,
                             "mediana": _med_prod,
                             "lim_inf": float(_lim_inf_prod),
                             "lim_sup": float(_lim_sup_prod),
@@ -1879,6 +1942,9 @@ if unidad.startswith("Polimer") and all(
                             {
                                 "Producto": str(_prod),
                                 "n": int(len(_y_prod)),
+                                "n_estricto": int(len(_y_prod_estricta)),
+                                "n_relajado": int(len(_y_prod_relajada)),
+                                "Fuente": _fuente_prod,
                                 "Mediana": _med_prod,
                                 "Lim_inf": float(_lim_inf_prod),
                                 "Lim_sup": float(_lim_sup_prod),
@@ -2006,7 +2072,7 @@ if unidad.startswith("Polimer") and all(
                         st.markdown("**Bandas históricas por grado**")
                         st.caption(
                             f"Grados con banda disponible: {_n_producto_stats}. "
-                            "Estas bandas no son parte de la ecuación; solo limitan extrapolaciones irreales del modelo."
+                            "Estas bandas no son parte de la ecuación; corrigen sesgo y limitan extrapolaciones irreales del modelo."
                         )
 
                         if isinstance(_producto_stats_df, pd.DataFrame) and len(_producto_stats_df) > 0:
@@ -2187,8 +2253,14 @@ if unidad.startswith("Polimer") and all(
                             _producto_bias = {}
                             _filas_bias = []
 
+                            _mask_bias_base = (
+                                _mask_producto_bias_ref
+                                if "_mask_producto_bias_ref" in locals()
+                                else _mask_producto_ref
+                            )
+
                             _idx_bias_ref = df_agrup.index[
-                                _mask_producto_ref
+                                _mask_bias_base
                                 & df_agrup.index.isin(_idx_all)
                             ]
 
@@ -2342,12 +2414,31 @@ if unidad.startswith("Polimer") and all(
 
                             _lim_inf_prod = float(_stat_prod["lim_inf"])
                             _lim_sup_prod = float(_stat_prod["lim_sup"])
+                            _med_prod = float(_stat_prod["mediana"])
+                            _n_prod = int(_stat_prod.get("n", 0))
 
-                            # La banda del grado es un límite de plausibilidad,
-                            # no una media forzada. Si el modelo está dentro de la banda,
-                            # se conserva.
+                            # Pull suave hacia el histórico del grado.
+                            #
+                            # - Si hay buen histórico del grado, confiamos más en su
+                            #   comportamiento típico.
+                            # - Si hay poco histórico, dejamos pesar más al modelo.
+                            #
+                            # Esto no convierte al grado en target fijo: solo reduce
+                            # sobre/subestimaciones sistemáticas y evita picos.
+                            if _n_prod >= 8:
+                                _peso_modelo_grado = 0.50
+                            elif _n_prod >= 4:
+                                _peso_modelo_grado = 0.60
+                            else:
+                                _peso_modelo_grado = 0.70
+
+                            _pred_blend = (
+                                _peso_modelo_grado * _pred_corregida_producto[_i_pred]
+                                + (1.0 - _peso_modelo_grado) * _med_prod
+                            )
+
                             _pred_corregida_producto[_i_pred] = np.clip(
-                                _pred_corregida_producto[_i_pred],
+                                _pred_blend,
                                 _lim_inf_prod,
                                 _lim_sup_prod,
                             )
