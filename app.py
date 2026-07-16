@@ -1468,13 +1468,113 @@ if unidad.startswith("Polimer") and all(
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
     _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
 
-    # Período confiable solicitado para entrenar el modelo.
-    _periodo_base_modelo = (
-        (_fecha >= pd.Timestamp("2025-12-01"))
-        & (_fecha <= pd.Timestamp("2026-02-28 23:59:59"))
+    # Benchmark de lechos/catalizador sanos.
+    #
+    # Noviembre 2025 fue identificado por operación como un ejemplo claro
+    # del impacto del cambio de lecho. Por eso el benchmark debe entrenarse
+    # con un período posterior al cambio, no con campañas bajo sospecha.
+    with sidebar_modelo:
+        st.markdown("---")
+        st.subheader("Modelo rendimiento estimado")
+
+        with st.expander("Benchmark lechos sanos", expanded=True):
+            st.caption(
+                "Usá un período posterior al cambio de lecho para que el estimado represente "
+                "rendimiento esperado con lechos/catalizador sanos."
+            )
+
+            _fecha_cambio_lecho = st.date_input(
+                "Fecha cambio de lecho",
+                value=pd.Timestamp("2025-11-01").date(),
+                key="fecha_cambio_lecho_benchmark",
+                help="Ajustar con la fecha real del cambio de lecho de noviembre 2025.",
+            )
+
+            c_bench_1, c_bench_2 = st.columns(2)
+            with c_bench_1:
+                _dias_estabilizacion_lecho = st.number_input(
+                    "Días estabilización",
+                    min_value=0,
+                    max_value=45,
+                    value=7,
+                    step=1,
+                    key="dias_estabilizacion_lecho",
+                    help="Días posteriores al cambio que se excluyen por transición/estabilización.",
+                )
+            with c_bench_2:
+                _dias_benchmark_lecho = st.number_input(
+                    "Días benchmark",
+                    min_value=30,
+                    max_value=240,
+                    value=120,
+                    step=5,
+                    key="dias_benchmark_lecho",
+                    help="Ventana usada para entrenar el benchmark sano posterior al cambio.",
+                )
+
+            st.markdown("**Período adicional de referencia sana**")
+            _usar_abril_2025_benchmark = st.checkbox(
+                "Incluir abril 2025",
+                value=True,
+                key="usar_abril_2025_benchmark_sano",
+                help=(
+                    "Incluye abril 2025 como período adicional de referencia sana, "
+                    "además del período posterior al cambio de lecho de noviembre 2025."
+                ),
+            )
+
+            c_abril_1, c_abril_2 = st.columns(2)
+            with c_abril_1:
+                _inicio_abril_2025 = st.date_input(
+                    "Inicio abril 2025",
+                    value=pd.Timestamp("2025-04-01").date(),
+                    key="inicio_abril_2025_benchmark",
+                )
+            with c_abril_2:
+                _fin_abril_2025 = st.date_input(
+                    "Fin abril 2025",
+                    value=pd.Timestamp("2025-04-30").date(),
+                    key="fin_abril_2025_benchmark",
+                )
+
+            _usar_fallback_historico_producto = st.checkbox(
+                "Permitir fallback histórico por grado",
+                value=False,
+                key="fallback_historico_producto_sano",
+                help=(
+                    "Si un grado no tiene suficientes datos en los períodos sanos definidos, "
+                    "permite usar histórico fuera del benchmark. Para diagnóstico de contaminantes, "
+                    "conviene dejarlo desactivado."
+                ),
+            )
+
+    _inicio_benchmark_lecho = (
+        pd.Timestamp(_fecha_cambio_lecho)
+        + pd.Timedelta(days=int(_dias_estabilizacion_lecho))
+    )
+    _fin_benchmark_lecho = (
+        _inicio_benchmark_lecho
+        + pd.Timedelta(days=int(_dias_benchmark_lecho))
     )
 
+    _periodo_base_post_lecho = (
+        (_fecha >= _inicio_benchmark_lecho)
+        & (_fecha <= _fin_benchmark_lecho)
+    )
+
+    _periodo_abril_2025 = (
+        (_fecha >= pd.Timestamp(_inicio_abril_2025))
+        & (_fecha <= pd.Timestamp(_fin_abril_2025) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+    )
+
+    if bool(_usar_abril_2025_benchmark):
+        _periodo_base_modelo = _periodo_base_post_lecho | _periodo_abril_2025
+    else:
+        _periodo_base_modelo = _periodo_base_post_lecho
+
     _presion_ok = (_presion > 30.0) & (_presion < 31.0)
+
+    _periodo_referencia_sana = _periodo_base_modelo & _presion_ok
 
     # ----------------------------------------------------------------------
     # Variables derivadas para el modelo
@@ -1762,9 +1862,8 @@ if unidad.startswith("Polimer") and all(
 
                     _sin_donor_hist_mask = (
                         _sin_donor_mask
-                        & _presion_ok
+                        & _periodo_referencia_sana
                         & _rendimiento.notna()
-                        & (~_evento_excluido_hist)
                     )
 
                     if "Nivel_R2301" in df_agrup.columns:
@@ -1813,10 +1912,11 @@ if unidad.startswith("Polimer") and all(
                         & (_fecha <= pd.Timestamp("2025-04-30 23:59:59"))
                     )
 
+                    # Referencia estricta por grado:
+                    # usar solo el período benchmark post cambio de lecho.
                     _mask_producto_ref = (
-                        _presion_ok
+                        _periodo_referencia_sana
                         & _rendimiento.notna()
-                        & (~_evento_excluido_producto)
                         & _producto_norm_all.notna()
                     )
 
@@ -1845,12 +1945,22 @@ if unidad.startswith("Polimer") and all(
                     # usamos presión normal + rendimiento válido + producto válido.
                     # Esto evita que grados como XSD6601K, LYD6200K o WSD6601K
                     # queden sin calibración y el modelo extrapole.
-                    _mask_producto_ref_relajada = (
-                        _presion_ok
-                        & _rendimiento.notna()
-                        & (~_evento_excluido_producto)
-                        & _producto_norm_all.notna()
-                    )
+                    if bool(_usar_fallback_historico_producto):
+                        # Fallback opcional: usar histórico no excluido.
+                        # Para diagnóstico de contaminantes, mantener desactivado salvo que falten datos.
+                        _mask_producto_ref_relajada = (
+                            _presion_ok
+                            & _rendimiento.notna()
+                            & (~_evento_excluido_producto)
+                            & _producto_norm_all.notna()
+                        )
+                    else:
+                        # Sin fallback: la referencia relajada sigue siendo post cambio de lecho.
+                        _mask_producto_ref_relajada = (
+                            _periodo_referencia_sana
+                            & _rendimiento.notna()
+                            & _producto_norm_all.notna()
+                        )
 
                     _df_prod_ref_relajada = pd.DataFrame(
                         {
@@ -1981,12 +2091,9 @@ if unidad.startswith("Polimer") and all(
                 # Coeficientes aplicados sobre variables estandarizadas:
                 # z_i = (variable_i - mediana_i) / escala_i * sqrt(peso_i)
                 with sidebar_modelo:
-                    st.markdown("---")
-                    st.subheader("Modelo rendimiento estimado")
-
                     with st.expander("Ecuación editable", expanded=False):
                         st.caption(
-                            "Modelo lineal entrenado con dic-25 a feb-26. "
+                            "Modelo lineal entrenado con el período benchmark de lechos sanos. "
                             "Los coeficientes se aplican sobre variables estandarizadas. "
                             "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se usa una referencia KFM6110 sin donor abr/may-2026."
                         )
@@ -1994,9 +2101,20 @@ if unidad.startswith("Polimer") and all(
                         st.markdown("**Diagnóstico del modelo**")
                         c_diag_1, c_diag_2 = st.columns(2)
                         with c_diag_1:
-                            st.metric("Puntos base", _n_base_modelo)
+                            st.metric("Puntos benchmark", _n_base_modelo)
                         with c_diag_2:
-                            st.metric("Sin donor en base", _n_sin_donor_base)
+                            st.metric("Sin donor benchmark", _n_sin_donor_base)
+
+                        try:
+                            _n_bench_abril = int((_periodo_abril_2025 & _presion_ok).sum()) if bool(_usar_abril_2025_benchmark) else 0
+                            _n_bench_post_lecho = int((_periodo_base_post_lecho & _presion_ok).sum())
+                            c_diag_abril_1, c_diag_abril_2 = st.columns(2)
+                            with c_diag_abril_1:
+                                st.metric("Benchmark abril 2025", _n_bench_abril)
+                            with c_diag_abril_2:
+                                st.metric("Benchmark post lecho", _n_bench_post_lecho)
+                        except Exception:
+                            pass
 
                         c_diag_3, c_diag_4 = st.columns(2)
                         with c_diag_3:
@@ -2011,7 +2129,7 @@ if unidad.startswith("Polimer") and all(
                             )
                         elif _n_sin_donor_base < 3:
                             st.info(
-                                "El período base dic-25/feb-26 tiene pocos puntos sin C-Donor. "
+                                "El período benchmark sano tiene pocos puntos sin C-Donor. "
                                 "Para KFM se usa la referencia específica de abr/may-2026."
                             )
 
@@ -2132,18 +2250,28 @@ if unidad.startswith("Polimer") and all(
                             "no como promedio histórico. Por eso se usa una referencia local alta del mismo grado."
                         )
 
-                        st.markdown("**Corrección por campaña**")
+                        st.markdown("**Corrección por campaña — exploratoria**")
                         _usar_correccion_campania = st.checkbox(
                             "Ajustar sesgo de campaña actual",
-                            value=True,
+                            value=False,
                             key="usar_correccion_campania_modelo",
                             help=(
-                                "Si una campaña completa de un grado viene sistemáticamente por debajo "
-                                "o por encima del estimado, aplica una corrección limitada. "
-                                "Sirve para grados como XSD6601K cuando el benchmark local queda alto "
-                                "respecto a la campaña real."
+                                "No activar para diagnóstico de contaminación/lechos. "
+                                "Si se activa, el estimado se ajusta contra el real de la campaña "
+                                "y puede ocultar una pérdida real de rendimiento del catalizador."
                             ),
                         )
+
+                        if _usar_correccion_campania:
+                            st.warning(
+                                "Modo exploratorio activado: el estimado se corrige usando el real de la campaña. "
+                                "No usar esta curva para decidir cambio de lechos por posible contaminante."
+                            )
+                        else:
+                            st.info(
+                                "Modo diagnóstico: el estimado queda independiente del rendimiento real actual. "
+                                "El desvío Real - Estimado sirve como señal de posible pérdida de actividad."
+                            )
 
                         c_corr_camp_1, c_corr_camp_2 = st.columns(2)
                         with c_corr_camp_1:
@@ -2151,7 +2279,7 @@ if unidad.startswith("Polimer") and all(
                                 "Peso campaña",
                                 min_value=0.00,
                                 max_value=1.00,
-                                value=0.85,
+                                value=0.50,
                                 step=0.05,
                                 format="%.2f",
                                 key="peso_correccion_campania_modelo",
@@ -2162,7 +2290,7 @@ if unidad.startswith("Polimer") and all(
                                 "Límite campaña",
                                 min_value=0.00,
                                 max_value=5.00,
-                                value=2.50,
+                                value=1.00,
                                 step=0.10,
                                 format="%.2f",
                                 key="limite_correccion_campania_modelo",
@@ -2851,6 +2979,24 @@ if unidad.startswith("Polimer") and all(
     df_agrup["Desvio_vs_productividad_estimada"] = (
         pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
         - pd.to_numeric(df_agrup["Productividad_estimada"], errors="coerce")
+    )
+
+    df_agrup["Indice_actividad_vs_estimado"] = (
+        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
+        / pd.to_numeric(df_agrup["Productividad_estimada"], errors="coerce")
+    ).replace([np.inf, -np.inf], np.nan)
+
+    # Señal simple para revisar posible pérdida de actividad:
+    # desvío negativo sostenido mayor a 1 punto respecto del benchmark sano.
+    _desvio_tmp = pd.to_numeric(
+        df_agrup["Desvio_vs_productividad_estimada"],
+        errors="coerce",
+    )
+
+    df_agrup["Alerta_baja_actividad"] = np.where(
+        _desvio_tmp <= -1.0,
+        1.0,
+        0.0,
     )
 
     df_agrup["Gap_vs_target_operativo"] = np.nan
