@@ -1651,6 +1651,8 @@ if unidad.startswith("Polimer") and all(
                 _n_sin_donor_kfm_fin2025 = 0
                 _ref_sin_donor_hist = np.nan
                 _ref_sin_donor_kfm_fin2025 = np.nan
+                _lim_inf_sin_donor_kfm_fin2025 = np.nan
+                _lim_sup_sin_donor_kfm_fin2025 = np.nan
                 _fuente_ref_sin_donor = "P90 del período base"
 
                 if "Sin_C_Donor_modelo" in _features:
@@ -1733,6 +1735,22 @@ if unidad.startswith("Polimer") and all(
                     if _n_sin_donor_kfm_fin2025 >= 2:
                         # Mediana robusta del KFM6110 sin donor de abr/may-2026.
                         _ref_sin_donor_kfm_fin2025 = float(_y_sin_donor_kfm_fin2025.median())
+
+                        # Banda robusta para evitar extrapolaciones irreales.
+                        # El modelo lineal puede irse muy arriba si una variable queda fuera
+                        # de la nube de entrenamiento. Para KFM sin donor, acotamos contra
+                        # el propio comportamiento observado en abr/may-2026.
+                        _q10_kfm = float(_y_sin_donor_kfm_fin2025.quantile(0.10))
+                        _q90_kfm = float(_y_sin_donor_kfm_fin2025.quantile(0.90))
+                        _lim_inf_sin_donor_kfm_fin2025 = min(
+                            _q10_kfm,
+                            _ref_sin_donor_kfm_fin2025 - 1.0,
+                        )
+                        _lim_sup_sin_donor_kfm_fin2025 = max(
+                            _q90_kfm,
+                            _ref_sin_donor_kfm_fin2025 + 1.0,
+                        )
+
                         _fuente_ref_sin_donor = "KFM6110 sin C-Donor abr/may-2026"
 
                     # Fallback: referencia histórica confiable sin donor.
@@ -1837,17 +1855,51 @@ if unidad.startswith("Polimer") and all(
                             format="%.4f",
                             key="ref_sin_donor_kfm_abr_may_2026_modelo",
                             help=(
-                                "Valor mínimo razonable para campañas sin C-Donor. "
+                                "Valor central esperado para campañas KFM6110 sin C-Donor. "
                                 "Se inicializa con KFM6110 sin C-Donor de abr/may-2026. "
                                 "Si no alcanza, usa histórico sin donor o P90 del período base."
                             ),
                         )
 
+                        if np.isfinite(_lim_inf_sin_donor_kfm_fin2025):
+                            _default_kfm_min = float(_lim_inf_sin_donor_kfm_fin2025)
+                        else:
+                            _default_kfm_min = float(_default_ref_sin_donor - 1.5)
+
+                        if np.isfinite(_lim_sup_sin_donor_kfm_fin2025):
+                            _default_kfm_max = float(_lim_sup_sin_donor_kfm_fin2025)
+                        else:
+                            _default_kfm_max = float(_default_ref_sin_donor + 1.5)
+
+                        c_kfm_min, c_kfm_max = st.columns(2)
+                        with c_kfm_min:
+                            _kfm_min_edit = st.number_input(
+                                "Mín KFM sin donor",
+                                value=float(_default_kfm_min),
+                                step=0.10,
+                                format="%.4f",
+                                key="lim_inf_kfm_sin_donor_abr_may_2026",
+                            )
+                        with c_kfm_max:
+                            _kfm_max_edit = st.number_input(
+                                "Máx KFM sin donor",
+                                value=float(_default_kfm_max),
+                                step=0.10,
+                                format="%.4f",
+                                key="lim_sup_kfm_sin_donor_abr_may_2026",
+                            )
+
+                        if _kfm_min_edit >= _kfm_max_edit:
+                            st.warning("El mínimo KFM sin donor debe ser menor que el máximo.")
+                            _kfm_min_edit = float(_default_ref_sin_donor - 1.5)
+                            _kfm_max_edit = float(_default_ref_sin_donor + 1.5)
+
                         st.caption(
                             "Fuente referencia sin donor: "
                             f"{_fuente_ref_sin_donor}. "
                             "Esta corrección usa PRODUCTO solo para seleccionar la referencia KFM6110 abr/may-2026; "
-                            "PRODUCTO no entra como variable de correlación."
+                            "PRODUCTO no entra como variable de correlación. "
+                            "Para evitar extrapolaciones irreales, KFM sin donor queda acotado entre el mínimo y máximo indicados."
                         )
 
                         _feature_labels_modelo = {
@@ -1994,11 +2046,31 @@ if unidad.startswith("Polimer") and all(
 
                         if np.any(_sin_donor_pred):
                             # Referencia sin donor definida en el panel del modelo.
-                            # Evita que KFM caiga por una extrapolación falsa de TEA/C-Donor.
-                            _piso_sin_donor = float(_ref_sin_donor_edit)
+                            # Antes se usaba como piso con np.maximum(), pero eso dejaba
+                            # pasar picos altos irreales del modelo lineal.
+                            #
+                            # Nueva lógica:
+                            # - Para KFM/sin donor, la predicción se aproxima a la referencia
+                            #   observada abr/may-2026.
+                            # - Se permite solo una corrección moderada del modelo.
+                            # - Luego se acota entre mínimo y máximo editables.
+                            _ref_kfm = float(_ref_sin_donor_edit)
+                            _min_kfm = float(_kfm_min_edit)
+                            _max_kfm = float(_kfm_max_edit)
+
+                            _pred_sin_donor = (
+                                0.70 * _ref_kfm
+                                + 0.30 * _pred
+                            )
+                            _pred_sin_donor = np.clip(
+                                _pred_sin_donor,
+                                _min_kfm,
+                                _max_kfm,
+                            )
+
                             _pred = np.where(
                                 _sin_donor_pred,
-                                np.maximum(_pred, _piso_sin_donor),
+                                _pred_sin_donor,
                                 _pred,
                             )
 
