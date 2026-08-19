@@ -1436,25 +1436,14 @@ filtro_producto_activo = unidad.startswith("Polimer") and len(productos_sel) > 0
 
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
-# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR CORRELACION DE PROCESO
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR VECINOS DE VARIABLES CRITICAS
 #
-# Criterio actual:
-# - NO usa PRODUCTO / grado pellet.
-# - NO usa MFI_pellets.
-# - Entrena una correlación de referencia con un período confiable fijo:
-#     01/12/2025 a 28/02/2026
-# - Variables de correlación:
-#     Conc_H2
-#     Conc_propano
-#     Slurry
-#     Relación TEA/C-Donor
-#     Temperatura_R2301
-#     Sin_C_Donor
-#
-# Nota importante:
-# La relación TEA/C-Donor no está definida cuando C-Donor = 0. Para capturar
-# correctamente campañas sin donor, como KFM, se agrega la variable binaria
-# Sin_C_Donor. El grado se mantiene solo para filtro/visualización.
+# Criterio conceptual:
+# - El rendimiento estimado NO depende del cambio de lecho.
+# - El rendimiento estimado NO se corrige contra el rendimiento real de la campaña actual.
+# - El estimado se calcula por similitud de variables críticas de proceso/catalizador.
+# - El desvío Real - Estimado se usa como señal de posible pérdida de actividad,
+#   contaminante o necesidad de revisar/cambiar lechos.
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
     for col in [
@@ -1468,39 +1457,81 @@ if unidad.startswith("Polimer") and all(
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
     _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
 
-    # Benchmark independiente del cambio de lecho.
-    #
-    # Objetivo del modelo:
-    # estimar el rendimiento esperado por variables críticas de proceso/catalizador.
-    # El cambio de lecho NO debe ser una variable ni un criterio directo,
-    # porque justamente se quiere usar el desvío real vs estimado para decidir
-    # si el lecho puede estar impactando la actividad.
     with sidebar_modelo:
         st.markdown("---")
         st.subheader("Modelo rendimiento estimado")
 
         with st.expander("Benchmark por variables críticas", expanded=True):
             st.caption(
-                "El estimado NO depende del cambio de lecho. Se calcula con variables críticas "
-                "de proceso/catalizador y se usa para comparar contra el real."
+                "El estimado se calcula con puntos históricos de condiciones de proceso similares. "
+                "No usa la fecha de cambio de lecho como variable y no se ajusta contra el real de la campaña actual."
             )
 
-            _usar_todo_historico_valido = st.checkbox(
-                "Usar todo el histórico válido",
-                value=True,
-                key="usar_todo_historico_valido_modelo",
+            _percentil_vecinos = st.number_input(
+                "Percentil de vecinos similares",
+                min_value=0.30,
+                max_value=0.90,
+                value=0.60,
+                step=0.05,
+                format="%.2f",
+                key="percentil_vecinos_rendimiento_estimado",
                 help=(
-                    "Recomendado para diagnóstico de lechos: el modelo aprende de condiciones "
-                    "operativas comparables, no de la fecha de cambio de lecho."
+                    "Percentil del rendimiento histórico entre puntos con variables críticas similares. "
+                    "0.50 es mediana; 0.60/0.65 es un benchmark algo exigente."
                 ),
             )
+
+            c_knn_1, c_knn_2 = st.columns(2)
+            with c_knn_1:
+                _k_min_vecinos = st.number_input(
+                    "Mín. vecinos",
+                    min_value=5,
+                    max_value=80,
+                    value=12,
+                    step=1,
+                    key="k_min_vecinos_rendimiento",
+                )
+            with c_knn_2:
+                _k_max_vecinos = st.number_input(
+                    "Máx. vecinos",
+                    min_value=10,
+                    max_value=200,
+                    value=60,
+                    step=5,
+                    key="k_max_vecinos_rendimiento",
+                )
+
+            c_hist_1, c_hist_2 = st.columns(2)
+            with c_hist_1:
+                _usar_solo_historico_anterior = st.checkbox(
+                    "Solo histórico anterior",
+                    value=True,
+                    key="solo_historico_anterior_rendimiento",
+                    help=(
+                        "Recomendado para diagnóstico: estima cada punto usando datos anteriores, "
+                        "evitando que la campaña actual se use para calibrarse a sí misma."
+                    ),
+                )
+            with c_hist_2:
+                _dias_exclusion_local = st.number_input(
+                    "Exclusión local [días]",
+                    min_value=0,
+                    max_value=90,
+                    value=14,
+                    step=1,
+                    key="dias_exclusion_local_rendimiento",
+                    help="Días alrededor del punto evaluado que se excluyen del conjunto de referencia.",
+                )
 
             st.markdown("**Exclusiones por datos no confiables**")
             _excluir_evento_bajo_nivel = st.checkbox(
                 "Excluir evento bajo nivel reactor",
                 value=True,
                 key="excluir_evento_bajo_nivel_modelo",
-                help="Excluye el período con baja productividad por bajo nivel no detectado.",
+                help=(
+                    "Excluye el período con baja productividad por bajo nivel no detectado. "
+                    "Abril 2025 queda incluido por defecto."
+                ),
             )
 
             c_exc_1, c_exc_2 = st.columns(2)
@@ -1515,47 +1546,18 @@ if unidad.startswith("Polimer") and all(
                     "Fin evento",
                     value=pd.Timestamp("2025-03-31").date(),
                     key="fin_evento_bajo_nivel_modelo",
-                    help=(
-                        "Marzo 2025 por defecto para que abril 2025 pueda entrar "
-                        "como dato válido, según tu criterio."
-                    ),
                 )
 
-            _min_puntos_modelo = st.number_input(
-                "Mínimo puntos benchmark",
-                min_value=20,
-                max_value=1000,
-                value=80,
-                step=10,
-                key="min_puntos_modelo_critico",
-                help="Cantidad mínima deseada de puntos válidos para entrenar el modelo.",
-            )
-
             st.info(
-                "Criterio diagnóstico: si Real - Estimado es negativo de forma sostenida, "
-                "puede indicar pérdida de actividad, contaminante o necesidad de revisar lechos. "
-                "El modelo no usa la fecha de cambio de lecho como variable."
+                "Uso diagnóstico: si Real - Estimado es negativo de forma sostenida, "
+                "puede indicar pérdida de actividad del catalizador por contaminante o necesidad de revisar lechos."
             )
 
     _presion_ok = (_presion > 30.0) & (_presion < 31.0)
 
-    _periodo_base_modelo = pd.Series(True, index=df_agrup.index)
-
-    if bool(_excluir_evento_bajo_nivel):
-        _evento_bajo_nivel = (
-            (_fecha >= pd.Timestamp(_inicio_evento_bajo_nivel))
-            & (_fecha <= pd.Timestamp(_fin_evento_bajo_nivel) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-        )
-        _periodo_base_modelo = _periodo_base_modelo & (~_evento_bajo_nivel)
-
-    # Referencia del modelo: histórico válido por variables críticas.
-    # No representa lecho sano por fecha; representa condiciones operativas confiables.
-    _periodo_referencia_sana = _periodo_base_modelo & _presion_ok
-
     # ----------------------------------------------------------------------
     # Variables derivadas para el modelo
     # ----------------------------------------------------------------------
-    # Sin_C_Donor captura explícitamente campañas sin donor.
     if "C_Donor" in df_agrup.columns:
         _cdonor_num = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
         df_agrup["Sin_C_Donor_modelo"] = np.where(
@@ -1566,13 +1568,8 @@ if unidad.startswith("Polimer") and all(
     else:
         df_agrup["Sin_C_Donor_modelo"] = np.nan
 
-    # Relación TEA/C-Donor:
-    # - Se toma la columna Excel si existe.
-    # - Si no existe, se calcula como TEA/C_Donor.
-    # - Cuando no hay donor, NO se fija en 0, porque eso genera una
-    #   extrapolación falsa y tira el rendimiento estimado hacia abajo.
-    #   En esos puntos luego se reemplaza por el valor neutro del modelo
-    #   y la condición se representa con Sin_C_Donor_modelo.
+    # Relación TEA/C-Donor. Cuando no hay donor, la relación es indefinida:
+    # se neutraliza luego con la mediana del conjunto de referencia.
     _rel_excel = None
     if "Rel_TEA_CDonor" in df_agrup.columns:
         _rel_excel = pd.to_numeric(df_agrup["Rel_TEA_CDonor"], errors="coerce")
@@ -1581,7 +1578,10 @@ if unidad.startswith("Polimer") and all(
     if all(c in df_agrup.columns for c in ["TEA", "C_Donor"]):
         _tea = pd.to_numeric(df_agrup["TEA"], errors="coerce")
         _cdonor = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
-        _rel_calc = (_tea / _cdonor.where(_cdonor.abs() > 0.001)).replace([np.inf, -np.inf], np.nan)
+        _rel_calc = (_tea / _cdonor.where(_cdonor.abs() > 0.001)).replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
 
     if _rel_excel is not None and _rel_calc is not None:
         _rel = _rel_excel.fillna(_rel_calc)
@@ -1593,11 +1593,14 @@ if unidad.startswith("Polimer") and all(
         _rel = pd.Series(np.nan, index=df_agrup.index)
 
     df_agrup["Rel_TEA_CDonor_modelo"] = _rel
+    if "Sin_C_Donor_modelo" in df_agrup.columns:
+        df_agrup.loc[
+            pd.to_numeric(df_agrup["Sin_C_Donor_modelo"], errors="coerce").fillna(0.0) > 0.5,
+            "Rel_TEA_CDonor_modelo",
+        ] = np.nan
 
-    # Variables críticas para la correlación.
-    #
-    # No se incluye cambio de lecho. El objetivo es que el modelo estime
-    # el rendimiento esperado por condición de operación/catalizador.
+    # Variables críticas candidatas.
+    # PRODUCTO no entra en el cálculo; el grado queda solo para filtrar/visualizar.
     _features_candidatas = [
         "MFI_polvo",
         "XS",
@@ -1616,29 +1619,36 @@ if unidad.startswith("Polimer") and all(
     for _f in _features_candidatas:
         if _f in df_agrup.columns:
             _serie = pd.to_numeric(df_agrup[_f], errors="coerce")
-            # Sin_C_Donor_modelo puede ser todo 0 si en el período no hubo campañas sin donor;
-            # igual se permite si existe, porque es clave para extrapolar KFM.
-            if _f == "Sin_C_Donor_modelo":
-                if _serie.notna().sum() >= 3:
-                    _features.append(_f)
-            elif _serie.notna().sum() >= 5:
+            if _serie.notna().sum() >= max(10, int(_k_min_vecinos)):
                 _features.append(_f)
 
     _estimado = np.full(len(df_agrup), np.nan)
     _conf = np.full(len(df_agrup), np.nan)
-    _percentil_base = np.full(len(df_agrup), np.nan)
     _dist_min = np.full(len(df_agrup), np.nan)
-    _target_flag = np.zeros(len(df_agrup))
+    _n_vecinos_usados = np.full(len(df_agrup), np.nan)
+    _indicador_base = np.zeros(len(df_agrup))
 
     if len(_features) >= 3:
-        # Base confiable de entrenamiento: período dic-25 a feb-26.
+        # Conjunto histórico válido. Se excluyen datos malos, no cambios de lecho.
         _base_mask = (
-            _periodo_base_modelo
-            & _presion_ok
+            _presion_ok
             & _rendimiento.notna()
+            & _fecha.notna()
         )
 
-        # Filtros operativos recomendados si existen.
+        if bool(_excluir_evento_bajo_nivel):
+            _evento_bajo_nivel = (
+                (_fecha >= pd.Timestamp(_inicio_evento_bajo_nivel))
+                & (
+                    _fecha
+                    <= pd.Timestamp(_fin_evento_bajo_nivel)
+                    + pd.Timedelta(days=1)
+                    - pd.Timedelta(seconds=1)
+                )
+            )
+            _base_mask = _base_mask & (~_evento_bajo_nivel)
+
+        # Filtros de operación normal si existen.
         if "Nivel_R2301" in df_agrup.columns:
             _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
             _base_mask = _base_mask & (_nivel > 60.0) & (_nivel < 70.0)
@@ -1647,1318 +1657,200 @@ if unidad.startswith("Polimer") and all(
             _ura = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
             _base_mask = _base_mask & (_ura > 8000.0) & (_ura < 13000.0)
 
-        # Condiciones mínimas de validez para las variables principales.
         if "Slurry" in _features:
-            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Slurry"], errors="coerce") > 50.0)
-
-        if "Conc_propano" in _features:
-            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Conc_propano"], errors="coerce") > 0.0)
-
-        if "Conc_H2" in _features:
-            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Conc_H2"], errors="coerce") > 0.0)
-
-        if "MFI_polvo" in _features:
-            _base_mask = _base_mask & (pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") > 0.0)
-
-        if "XS" in _features:
-            _base_mask = _base_mask & (pd.to_numeric(df_agrup["XS"], errors="coerce") >= 0.0)
-
-        if "C_Donor" in _features:
-            _base_mask = _base_mask & (pd.to_numeric(df_agrup["C_Donor"], errors="coerce") >= 0.0)
-
-        for _f in _features:
-            _base_mask = _base_mask & pd.to_numeric(df_agrup[_f], errors="coerce").notna()
-
-        _base_modelo = df_agrup.loc[_base_mask].copy()
-
-        # Si el filtro operativo estricto deja muy pocos puntos, se relaja nivel/URA
-        # pero se mantiene el período dic-25 a feb-26 y presión normal.
-        if len(_base_modelo) < max(8, len(_features) + 2):
-            _base_mask_relajado = (
-                _periodo_base_modelo
-                & _presion_ok
-                & _rendimiento.notna()
+            _base_mask = _base_mask & (
+                pd.to_numeric(df_agrup["Slurry"], errors="coerce") > 50.0
             )
 
-            for _f in _features:
-                _base_mask_relajado = _base_mask_relajado & pd.to_numeric(
-                    df_agrup[_f],
-                    errors="coerce",
-                ).notna()
-
-            _base_modelo = df_agrup.loc[_base_mask_relajado].copy()
-
-        if len(_base_modelo) >= max(6, len(_features) + 1):
-            _x_base = _base_modelo[_features].copy()
-
-            for _f in _features:
-                _x_base[_f] = pd.to_numeric(_x_base[_f], errors="coerce")
-
-            _y_base = pd.to_numeric(_base_modelo["Rendimiento"], errors="coerce")
-            _ok = _x_base.notna().all(axis=1) & _y_base.notna()
-
-            _x_base = _x_base.loc[_ok]
-            _y_base = _y_base.loc[_ok]
-            _idx_base = _x_base.index.to_numpy()
-
-            if len(_y_base) >= max(6, len(_features) + 1):
-                _med = _x_base.median(axis=0, skipna=True)
-                _q75 = _x_base.quantile(0.75)
-                _q25 = _x_base.quantile(0.25)
-                _escala = (_q75 - _q25).replace(0, np.nan)
-                _escala = _escala.fillna(_x_base.std(axis=0, skipna=True))
-                _escala = _escala.replace(0, 1.0).fillna(1.0)
-
-                _x_np = _x_base.to_numpy(dtype=float)
-                _y_np = _y_base.to_numpy(dtype=float)
-
-                _med_np = _med.to_numpy(dtype=float)
-                _escala_np = _escala.to_numpy(dtype=float)
-
-                # Pesos de variables para que la correlación priorice las más críticas.
-                _pesos = []
-                for _f in _features:
-                    if _f == "Sin_C_Donor_modelo":
-                        _pesos.append(5.0)
-                    elif _f == "Rel_TEA_CDonor_modelo":
-                        _pesos.append(4.5)
-                    elif _f == "C_Donor":
-                        _pesos.append(4.0)
-                    elif _f == "Conc_propano":
-                        _pesos.append(3.8)
-                    elif _f == "Conc_H2":
-                        _pesos.append(3.5)
-                    elif _f == "Slurry":
-                        _pesos.append(3.2)
-                    elif _f == "MFI_polvo":
-                        _pesos.append(3.0)
-                    elif _f == "XS":
-                        _pesos.append(2.8)
-                    elif _f == "Temperatura_R2301":
-                        _pesos.append(2.7)
-                    elif _f == "Tipo_catalizador_productividad":
-                        _pesos.append(2.5)
-                    elif _f == "Indicador_ZN389_activo":
-                        _pesos.append(2.5)
-                    else:
-                        _pesos.append(1.0)
-
-                _pesos = np.array(_pesos, dtype=float)
-
-                _x_std = ((_x_np - _med_np) / _escala_np) * np.sqrt(_pesos)
-
-                # Diagnóstico de representatividad del período base.
-                _n_base_modelo = int(len(_y_np))
-                _n_sin_donor_base = 0
-                _n_sin_donor_hist = 0
-                _n_sin_donor_kfm_fin2025 = 0
-                _ref_sin_donor_hist = np.nan
-                _ref_sin_donor_kfm_fin2025 = np.nan
-                _lim_inf_sin_donor_kfm_fin2025 = np.nan
-                _lim_sup_sin_donor_kfm_fin2025 = np.nan
-                _fuente_ref_sin_donor = "P90 del período base"
-
-                if "Sin_C_Donor_modelo" in _features:
-                    _sin_donor_base = pd.to_numeric(
-                        _x_base["Sin_C_Donor_modelo"],
-                        errors="coerce",
-                    ).fillna(0.0) > 0.5
-                    _n_sin_donor_base = int(_sin_donor_base.sum())
-
-                    # Referencia específica solicitada:
-                    # KFM6110 sin C-Donor de abril/mayo 2026.
-                    # Esta referencia se usa para corregir la estimación de KFM,
-                    # sin volver a meter PRODUCTO como variable de correlación.
-                    _fin_2025_mask = (
-                        (_fecha >= pd.Timestamp("2026-04-01"))
-                        & (_fecha <= pd.Timestamp("2026-05-31 23:59:59"))
-                    )
-
-                    _sin_donor_mask = (
-                        pd.to_numeric(
-                            df_agrup["Sin_C_Donor_modelo"],
-                            errors="coerce",
-                        ).fillna(0.0) > 0.5
-                    )
-
-                    _kfm_mask = pd.Series(True, index=df_agrup.index, dtype=bool)
-                    if "Producto" in df_agrup.columns:
-                        _producto_norm_modelo = (
-                            df_agrup["Producto"]
-                            .astype("string")
-                            .map(normalizar_producto_operativo)
-                        )
-                        # Importante: eq() sobre dtype string puede devolver <NA>.
-                        # Si ese BooleanArray con NA se usa como máscara, Streamlit/Pandas
-                        # puede romper en runtime. Convertimos todo a bool puro.
-                        _kfm_mask = (
-                            _producto_norm_modelo
-                            .astype("string")
-                            .eq("KFM6110")
-                            .fillna(False)
-                            .astype(bool)
-                        )
-
-                    _sin_donor_kfm_fin2025_mask = (
-                        _fin_2025_mask.astype(bool)
-                        & _sin_donor_mask.astype(bool)
-                        & _kfm_mask.astype(bool)
-                        & _presion_ok.astype(bool)
-                        & _rendimiento.notna().astype(bool)
-                    )
-
-                    if "Nivel_R2301" in df_agrup.columns:
-                        _nivel_kfm = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
-                        _sin_donor_kfm_fin2025_mask = (
-                            _sin_donor_kfm_fin2025_mask
-                            & (_nivel_kfm > 60.0)
-                            & (_nivel_kfm < 70.0)
-                        )
-
-                    if "Calor_reaccion_URA" in df_agrup.columns:
-                        _ura_kfm = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
-                        _sin_donor_kfm_fin2025_mask = (
-                            _sin_donor_kfm_fin2025_mask
-                            & (_ura_kfm > 8000.0)
-                            & (_ura_kfm < 13000.0)
-                        )
-
-                    for _f_kfm in ["Conc_H2", "Conc_propano", "Slurry", "Temperatura_R2301"]:
-                        if _f_kfm in df_agrup.columns:
-                            _sin_donor_kfm_fin2025_mask = (
-                                _sin_donor_kfm_fin2025_mask
-                                & pd.to_numeric(df_agrup[_f_kfm], errors="coerce").notna()
-                            )
-
-                    _y_sin_donor_kfm_fin2025 = _rendimiento.loc[
-                        _sin_donor_kfm_fin2025_mask
-                    ].dropna()
-                    _n_sin_donor_kfm_fin2025 = int(len(_y_sin_donor_kfm_fin2025))
-
-                    if _n_sin_donor_kfm_fin2025 >= 2:
-                        # Mediana robusta del KFM6110 sin donor de abr/may-2026.
-                        _ref_sin_donor_kfm_fin2025 = float(_y_sin_donor_kfm_fin2025.median())
-
-                        # Banda robusta para evitar extrapolaciones irreales.
-                        # El modelo lineal puede irse muy arriba si una variable queda fuera
-                        # de la nube de entrenamiento. Para KFM sin donor, acotamos contra
-                        # el propio comportamiento observado en abr/may-2026.
-                        _q10_kfm = float(_y_sin_donor_kfm_fin2025.quantile(0.10))
-                        _q90_kfm = float(_y_sin_donor_kfm_fin2025.quantile(0.90))
-                        _lim_inf_sin_donor_kfm_fin2025 = min(
-                            _q10_kfm,
-                            _ref_sin_donor_kfm_fin2025 - 1.0,
-                        )
-                        _lim_sup_sin_donor_kfm_fin2025 = max(
-                            _q90_kfm,
-                            _ref_sin_donor_kfm_fin2025 + 1.0,
-                        )
-
-                        _fuente_ref_sin_donor = "KFM6110 sin C-Donor abr/may-2026"
-
-                    # Fallback: referencia histórica confiable sin donor.
-                    # Se usa solo si no hay suficientes puntos KFM abr/may-2026.
-                    _evento_excluido_hist = (
-                        (_fecha >= pd.Timestamp("2024-11-01"))
-                        & (_fecha <= pd.Timestamp("2025-04-30 23:59:59"))
-                    )
-
-                    _sin_donor_hist_mask = (
-                        _sin_donor_mask
-                        & _periodo_referencia_sana
-                        & _rendimiento.notna()
-                    )
-
-                    if "Nivel_R2301" in df_agrup.columns:
-                        _nivel_hist = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
-                        _sin_donor_hist_mask = _sin_donor_hist_mask & (_nivel_hist > 60.0) & (_nivel_hist < 70.0)
-
-                    if "Calor_reaccion_URA" in df_agrup.columns:
-                        _ura_hist = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
-                        _sin_donor_hist_mask = _sin_donor_hist_mask & (_ura_hist > 8000.0) & (_ura_hist < 13000.0)
-
-                    for _f_hist in ["Conc_H2", "Conc_propano", "Slurry", "Temperatura_R2301"]:
-                        if _f_hist in df_agrup.columns:
-                            _sin_donor_hist_mask = _sin_donor_hist_mask & pd.to_numeric(
-                                df_agrup[_f_hist],
-                                errors="coerce",
-                            ).notna()
-
-                    _y_sin_donor_hist = _rendimiento.loc[_sin_donor_hist_mask].dropna()
-                    _n_sin_donor_hist = int(len(_y_sin_donor_hist))
-
-                    if _n_sin_donor_hist >= 3:
-                        _ref_sin_donor_hist = float(_y_sin_donor_hist.median())
-                        if not np.isfinite(_ref_sin_donor_kfm_fin2025):
-                            _fuente_ref_sin_donor = "histórico confiable sin C-Donor"
-
-                # Bandas históricas por grado/producto normalizado.
-                #
-                # Criterio:
-                # - PRODUCTO no entra como variable de la correlación.
-                # - Sí se usa como límite operativo para evitar extrapolaciones irreales
-                #   del modelo lineal. Esto corrige casos como SMD6200 o cualquier otro
-                #   grado donde la extrapolación se va a valores muy altos.
-                _producto_stats = {}
-                _producto_stats_df = pd.DataFrame()
-                _n_producto_stats = 0
-
-                if "Producto" in df_agrup.columns:
-                    _producto_norm_all = (
-                        df_agrup["Producto"]
-                        .astype("string")
-                        .map(normalizar_producto_operativo)
-                    )
-
-                    _evento_excluido_producto = (
-                        (_fecha >= pd.Timestamp("2024-11-01"))
-                        & (_fecha <= pd.Timestamp("2025-04-30 23:59:59"))
-                    )
-
-                    # Referencia estricta por grado:
-                    # usar histórico válido por variables críticas.
-                    _mask_producto_ref = (
-                        _periodo_referencia_sana
-                        & _rendimiento.notna()
-                        & _producto_norm_all.notna()
-                    )
-
-                    if "Nivel_R2301" in df_agrup.columns:
-                        _nivel_prod = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
-                        _mask_producto_ref = _mask_producto_ref & (_nivel_prod > 60.0) & (_nivel_prod < 70.0)
-
-                    if "Calor_reaccion_URA" in df_agrup.columns:
-                        _ura_prod = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
-                        _mask_producto_ref = _mask_producto_ref & (_ura_prod > 8000.0) & (_ura_prod < 13000.0)
-
-                    if "Slurry" in df_agrup.columns:
-                        _slurry_prod = pd.to_numeric(df_agrup["Slurry"], errors="coerce")
-                        _mask_producto_ref = _mask_producto_ref & (_slurry_prod > 50.0)
-
-                    _df_prod_ref_estricta = pd.DataFrame(
-                        {
-                            "Producto_norm": _producto_norm_all,
-                            "Rendimiento": _rendimiento,
-                        },
-                        index=df_agrup.index,
-                    ).loc[_mask_producto_ref].dropna()
-
-                    # Referencia relajada por grado:
-                    # si los filtros estrictos dejan pocos puntos para un grado,
-                    # usamos histórico válido por variables críticas:
-                    # presión normal + rendimiento válido + producto válido,
-                    # respetando exclusiones de datos no confiables.
-                    #
-                    # Importante: no depende del cambio de lecho.
-                    _mask_producto_ref_relajada = (
-                        _periodo_referencia_sana
-                        & _rendimiento.notna()
-                        & _producto_norm_all.notna()
-                    )
-
-                    _df_prod_ref_relajada = pd.DataFrame(
-                        {
-                            "Producto_norm": _producto_norm_all,
-                            "Rendimiento": _rendimiento,
-                        },
-                        index=df_agrup.index,
-                    ).loc[_mask_producto_ref_relajada].dropna()
-
-                    # Máscara disponible para la corrección de sesgo posterior.
-                    _mask_producto_bias_ref = _mask_producto_ref_relajada.copy()
-
-                    _filas_prod_stats = []
-
-                    _productos_ref = sorted(
-                        set(_df_prod_ref_estricta["Producto_norm"].astype(str).unique()).union(
-                            set(_df_prod_ref_relajada["Producto_norm"].astype(str).unique())
-                        )
-                    )
-
-                    for _prod in _productos_ref:
-                        _y_prod_estricta = pd.to_numeric(
-                            _df_prod_ref_estricta.loc[
-                                _df_prod_ref_estricta["Producto_norm"].astype(str).eq(str(_prod)),
-                                "Rendimiento",
-                            ],
-                            errors="coerce",
-                        ).dropna()
-
-                        _y_prod_relajada = pd.to_numeric(
-                            _df_prod_ref_relajada.loc[
-                                _df_prod_ref_relajada["Producto_norm"].astype(str).eq(str(_prod)),
-                                "Rendimiento",
-                            ],
-                            errors="coerce",
-                        ).dropna()
-
-                        if len(_y_prod_estricta) >= 3:
-                            _y_prod = _y_prod_estricta
-                            _fuente_prod = "estricta"
-                        else:
-                            _y_prod = _y_prod_relajada
-                            _fuente_prod = "relajada"
-
-                        if len(_y_prod) < 2:
-                            continue
-
-                        _med_prod = float(_y_prod.median())
-                        _q05_prod = float(_y_prod.quantile(0.05))
-                        _q10_prod = float(_y_prod.quantile(0.10))
-                        _q25_prod = float(_y_prod.quantile(0.25))
-                        _q75_prod = float(_y_prod.quantile(0.75))
-                        _q90_prod = float(_y_prod.quantile(0.90))
-                        _q95_prod = float(_y_prod.quantile(0.95))
-                        _iqr_prod = max(_q75_prod - _q25_prod, 0.0)
-
-                        # Banda de plausibilidad por grado.
-                        # No debe actuar como target. Solo evita extrapolaciones absurdas.
-                        # Se amplía para no recortar rendimientos altos reales como KYD6110.
-                        if len(_y_prod) < 5:
-                            _margen_prod = max(1.25, 0.35 * _iqr_prod)
-                            _lim_inf_prod = min(_q10_prod - 0.50, _med_prod - _margen_prod)
-                            _lim_sup_prod = max(_q90_prod + 0.50, _med_prod + _margen_prod)
-                        else:
-                            _margen_prod = max(0.90, 0.45 * _iqr_prod)
-                            _lim_inf_prod = min(_q05_prod - _margen_prod, _med_prod - 1.00)
-                            _lim_sup_prod = max(_q95_prod + _margen_prod, _med_prod + 1.00)
-
-                        # Límite adicional: evita outliers únicos, pero permite operación alta real.
-                        _lim_sup_prod = min(
-                            _lim_sup_prod,
-                            _med_prod + max(3.00, 2.50 * _iqr_prod + 1.00),
-                        )
-                        _lim_inf_prod = max(
-                            _lim_inf_prod,
-                            _med_prod - max(3.00, 2.50 * _iqr_prod + 1.00),
-                        )
-
-                        _producto_stats[str(_prod)] = {
-                            "n": int(len(_y_prod)),
-                            "n_estricto": int(len(_y_prod_estricta)),
-                            "n_relajado": int(len(_y_prod_relajada)),
-                            "fuente": _fuente_prod,
-                            "mediana": _med_prod,
-                            "lim_inf": float(_lim_inf_prod),
-                            "lim_sup": float(_lim_sup_prod),
-                            "q05": _q05_prod,
-                            "q10": _q10_prod,
-                            "q90": _q90_prod,
-                            "q95": _q95_prod,
-                        }
-
-                        _filas_prod_stats.append(
-                            {
-                                "Producto": str(_prod),
-                                "n": int(len(_y_prod)),
-                                "n_estricto": int(len(_y_prod_estricta)),
-                                "n_relajado": int(len(_y_prod_relajada)),
-                                "Fuente": _fuente_prod,
-                                "Mediana": _med_prod,
-                                "Lim_inf": float(_lim_inf_prod),
-                                "Lim_sup": float(_lim_sup_prod),
-                                "Q05": _q05_prod,
-                                "Q10": _q10_prod,
-                                "Q90": _q90_prod,
-                                "Q95": _q95_prod,
-                            }
-                        )
-
-                    if _filas_prod_stats:
-                        _producto_stats_df = pd.DataFrame(_filas_prod_stats).sort_values("Producto")
-                        _n_producto_stats = int(len(_producto_stats_df))
-
-                # Modelo de correlación: ridge lineal con variables estandarizadas.
-                # Se evita sklearn para mantener requirements liviano.
-                _x_design = np.column_stack([np.ones(len(_x_std)), _x_std])
-                _lambda = 0.15
-                _ridge = np.eye(_x_design.shape[1]) * _lambda
-                _ridge[0, 0] = 0.0  # no penalizar intercepto
-
-                _beta_entrenada = np.linalg.pinv(
-                    _x_design.T @ _x_design + _ridge
-                ) @ _x_design.T @ _y_np
-
-                _beta = _beta_entrenada.copy()
-
-                # Ecuación editable por el usuario.
-                # Coeficientes aplicados sobre variables estandarizadas:
-                # z_i = (variable_i - mediana_i) / escala_i * sqrt(peso_i)
-                with sidebar_modelo:
-                    with st.expander("Ecuación editable", expanded=False):
-                        st.caption(
-                            "Modelo lineal entrenado con histórico válido y variables críticas. "
-                            "Los coeficientes se aplican sobre variables estandarizadas. "
-                            "Para puntos sin C-Donor se neutraliza TEA/C-Donor y se usa una referencia KFM6110 sin donor abr/may-2026."
-                        )
-
-                        st.markdown("**Diagnóstico del modelo**")
-                        c_diag_1, c_diag_2 = st.columns(2)
-                        with c_diag_1:
-                            st.metric("Puntos histórico válido", _n_base_modelo)
-                        with c_diag_2:
-                            st.metric("Sin donor histórico", _n_sin_donor_base)
-
-
-                        c_diag_3, c_diag_4 = st.columns(2)
-                        with c_diag_3:
-                            st.metric("KFM abr/may-26 sin donor", _n_sin_donor_kfm_fin2025)
-                        with c_diag_4:
-                            st.metric("Histórico sin donor", _n_sin_donor_hist)
-
-                        if _n_sin_donor_kfm_fin2025 < 2:
-                            st.warning(
-                                "No hay suficientes puntos KFM6110 sin C-Donor en abr/may-2026. "
-                                "La app usará el fallback histórico sin donor o P90 del período base."
-                            )
-                        elif _n_sin_donor_base < 3:
-                            st.info(
-                                "El período benchmark sano tiene pocos puntos sin C-Donor. "
-                                "Para KFM se usa la referencia específica de abr/may-2026."
-                            )
-
-                        if np.isfinite(_ref_sin_donor_kfm_fin2025):
-                            _default_ref_sin_donor = float(_ref_sin_donor_kfm_fin2025)
-                        elif np.isfinite(_ref_sin_donor_hist):
-                            _default_ref_sin_donor = float(_ref_sin_donor_hist)
-                        else:
-                            _default_ref_sin_donor = float(np.nanquantile(_y_np, 0.90))
-
-                        _ref_sin_donor_edit = st.number_input(
-                            "Referencia KFM6110 sin C-Donor",
-                            value=float(_default_ref_sin_donor),
-                            step=0.10,
-                            format="%.4f",
-                            key="ref_sin_donor_kfm_abr_may_2026_modelo",
-                            help=(
-                                "Valor central esperado para campañas KFM6110 sin C-Donor. "
-                                "Se inicializa con KFM6110 sin C-Donor de abr/may-2026. "
-                                "Si no alcanza, usa histórico sin donor o P90 del período base."
-                            ),
-                        )
-
-                        if np.isfinite(_lim_inf_sin_donor_kfm_fin2025):
-                            _default_kfm_min = float(_lim_inf_sin_donor_kfm_fin2025)
-                        else:
-                            _default_kfm_min = float(_default_ref_sin_donor - 1.5)
-
-                        if np.isfinite(_lim_sup_sin_donor_kfm_fin2025):
-                            _default_kfm_max = float(_lim_sup_sin_donor_kfm_fin2025)
-                        else:
-                            _default_kfm_max = float(_default_ref_sin_donor + 1.5)
-
-                        c_kfm_min, c_kfm_max = st.columns(2)
-                        with c_kfm_min:
-                            _kfm_min_edit = st.number_input(
-                                "Mín KFM sin donor",
-                                value=float(_default_kfm_min),
-                                step=0.10,
-                                format="%.4f",
-                                key="lim_inf_kfm_sin_donor_abr_may_2026",
-                            )
-                        with c_kfm_max:
-                            _kfm_max_edit = st.number_input(
-                                "Máx KFM sin donor",
-                                value=float(_default_kfm_max),
-                                step=0.10,
-                                format="%.4f",
-                                key="lim_sup_kfm_sin_donor_abr_may_2026",
-                            )
-
-                        if _kfm_min_edit >= _kfm_max_edit:
-                            st.warning("El mínimo KFM sin donor debe ser menor que el máximo.")
-                            _kfm_min_edit = float(_default_ref_sin_donor - 1.5)
-                            _kfm_max_edit = float(_default_ref_sin_donor + 1.5)
-
-                        st.caption(
-                            "Fuente referencia sin donor: "
-                            f"{_fuente_ref_sin_donor}. "
-                            "Esta corrección usa PRODUCTO solo para seleccionar la referencia KFM6110 abr/may-2026; "
-                            "PRODUCTO no entra como variable de correlación. "
-                            "Para evitar extrapolaciones irreales, KFM sin donor queda acotado entre el mínimo y máximo indicados."
-                        )
-
-                        st.markdown("**Bandas históricas por grado**")
-                        st.caption(
-                            f"Grados con banda disponible: {_n_producto_stats}. "
-                            "Estas bandas no son parte de la ecuación; corrigen sesgo y limitan extrapolaciones irreales del modelo."
-                        )
-
-                        if isinstance(_producto_stats_df, pd.DataFrame) and len(_producto_stats_df) > 0:
-                            with st.expander("Ver bandas por grado", expanded=False):
-                                st.dataframe(
-                                    _producto_stats_df.round(3),
-                                    width="stretch",
-                                    hide_index=True,
-                                )
-
-                        _bias_df_visible = st.session_state.get(
-                            "producto_bias_df_modelo",
-                            pd.DataFrame(),
-                        )
-
-                        if isinstance(_bias_df_visible, pd.DataFrame) and len(_bias_df_visible) > 0:
-                            with st.expander("Ver corrección de sesgo por grado", expanded=False):
-                                st.caption(
-                                    "Bias_aplicado se suma al modelo para corregir sub/sobreestimación sistemática de cada grado. "
-                                    "Ejemplo: si SMD6200 quedaba subestimado, este valor debería ser positivo."
-                                )
-                                st.dataframe(
-                                    _bias_df_visible.round(3),
-                                    width="stretch",
-                                    hide_index=True,
-                                )
-
-                        _ref_local_df_visible = st.session_state.get(
-                            "producto_ref_local_df_modelo",
-                            pd.DataFrame(),
-                        )
-
-                        st.markdown("**Criterio de benchmark por grado**")
-                        _percentil_ref_local_edit = st.number_input(
-                            "Percentil referencia local",
-                            min_value=0.50,
-                            max_value=0.95,
-                            value=0.85,
-                            step=0.05,
-                            format="%.2f",
-                            key="percentil_ref_local_grado_modelo",
-                            help=(
-                                "Percentil de rendimiento real usado entre vecinos históricos del mismo grado "
-                                "con condiciones similares. 0.85 equivale a P85. "
-                                "Subirlo hace el estimado más exigente; bajarlo lo acerca al promedio."
-                            ),
-                        )
-                        st.caption(
-                            "El rendimiento estimado se interpreta como benchmark esperado/bueno, "
-                            "no como promedio histórico. Por eso se usa una referencia local alta del mismo grado."
-                        )
-
-                        st.markdown("**Corrección por campaña — exploratoria**")
-                        _usar_correccion_campania = st.checkbox(
-                            "Ajustar sesgo de campaña actual",
-                            value=False,
-                            key="usar_correccion_campania_modelo",
-                            help=(
-                                "No activar para diagnóstico de contaminación/lechos. "
-                                "Si se activa, el estimado se ajusta contra el real de la campaña "
-                                "y puede ocultar una pérdida real de rendimiento del catalizador."
-                            ),
-                        )
-
-                        if _usar_correccion_campania:
-                            st.warning(
-                                "Modo exploratorio activado: el estimado se corrige usando el real de la campaña. "
-                                "No usar esta curva para decidir cambio de lechos por posible contaminante."
-                            )
-                        else:
-                            st.info(
-                                "Modo diagnóstico: el estimado queda independiente del rendimiento real actual. "
-                                "El desvío Real - Estimado sirve como señal de posible pérdida de actividad."
-                            )
-
-                        c_corr_camp_1, c_corr_camp_2 = st.columns(2)
-                        with c_corr_camp_1:
-                            _peso_correccion_campania = st.number_input(
-                                "Peso campaña",
-                                min_value=0.00,
-                                max_value=1.00,
-                                value=0.50,
-                                step=0.05,
-                                format="%.2f",
-                                key="peso_correccion_campania_modelo",
-                                help="Fracción del sesgo mediano de la campaña/local que se aplica al estimado.",
-                            )
-                        with c_corr_camp_2:
-                            _limite_correccion_campania = st.number_input(
-                                "Límite campaña",
-                                min_value=0.00,
-                                max_value=5.00,
-                                value=1.00,
-                                step=0.10,
-                                format="%.2f",
-                                key="limite_correccion_campania_modelo",
-                                help="Máxima corrección absoluta permitida por campaña.",
-                            )
-
-                        _ventana_correccion_campania = st.number_input(
-                            "Ventana local campaña [días]",
-                            min_value=3,
-                            max_value=45,
-                            value=10,
-                            step=1,
-                            key="ventana_correccion_campania_modelo",
-                            help=(
-                                "Para cada punto, calcula el sesgo local usando puntos cercanos "
-                                "de la misma campaña. Si no hay suficientes puntos, usa el sesgo "
-                                "mediano de toda la campaña."
-                            ),
-                        )
-
-                        _campania_bias_df_visible = st.session_state.get(
-                            "campania_bias_df_modelo",
-                            pd.DataFrame(),
-                        )
-
-                        if isinstance(_campania_bias_df_visible, pd.DataFrame) and len(_campania_bias_df_visible) > 0:
-                            with st.expander("Ver corrección por campaña", expanded=False):
-                                st.caption(
-                                    "Bias_campania = mediana(real - estimado) dentro de una campaña continua del mismo grado. "
-                                    "Se aplica limitado por el valor 'Límite campaña'."
-                                )
-                                st.dataframe(
-                                    _campania_bias_df_visible.round(3),
-                                    width="stretch",
-                                    hide_index=True,
-                                )
-
-                        if isinstance(_ref_local_df_visible, pd.DataFrame) and len(_ref_local_df_visible) > 0:
-                            with st.expander("Ver referencia local por grado", expanded=False):
-                                st.caption(
-                                    "Ref_local usa el percentil configurado de puntos del mismo grado con condiciones de proceso similares. "
-                                    "Sirve para revisar casos subestimados como KYD6110/RFD6140K y grados sobreestimados."
-                                )
-                                st.dataframe(
-                                    _ref_local_df_visible.round(3),
-                                    width="stretch",
-                                    hide_index=True,
-                                )
-
-                        _feature_labels_modelo = {
-                            "Conc_H2": "Concentración H2",
-                            "Conc_propano": "Concentración propano",
-                            "Slurry": "Slurry",
-                            "Rel_TEA_CDonor_modelo": "Relación TEA/C-Donor",
-                            "Temperatura_R2301": "Temperatura R-2301",
-                            "Sin_C_Donor_modelo": "Sin C-Donor",
-                        }
-
-                        _modelo_key = re.sub(r"[^A-Za-z0-9_]+", "_", "_".join(_features))
-
-                        _b_editados = []
-
-                        _col_b0_a, _col_b0_b = st.columns([1, 1])
-                        with _col_b0_a:
-                            _b0_edit = st.number_input(
-                                "b0",
-                                value=float(_beta_entrenada[0]),
-                                step=0.10,
-                                format="%.6f",
-                                key=f"coef_b0_{_modelo_key}",
-                            )
-                        with _col_b0_b:
-                            st.caption("Intercepto")
-
-                        _b_editados.append(float(_b0_edit))
-
-                        for _idx_coef, _feature_coef in enumerate(_features, start=1):
-                            _label_coef = _feature_labels_modelo.get(
-                                _feature_coef,
-                                nombres_legibles.get(_feature_coef, _feature_coef),
-                            )
-
-                            _col_coef_a, _col_coef_b = st.columns([1, 1])
-                            with _col_coef_a:
-                                _b_i = st.number_input(
-                                    f"b{_idx_coef}",
-                                    value=float(_beta_entrenada[_idx_coef]),
-                                    step=0.10,
-                                    format="%.6f",
-                                    key=f"coef_{_modelo_key}_{_feature_coef}",
-                                )
-                            with _col_coef_b:
-                                st.caption(_label_coef)
-
-                            _b_editados.append(float(_b_i))
-
-                        _beta = np.array(_b_editados, dtype=float)
-
-                        _terminos_eq = [f"{_beta[0]:.3f}"]
-                        for _idx_coef, _feature_coef in enumerate(_features, start=1):
-                            _label_coef = _feature_labels_modelo.get(
-                                _feature_coef,
-                                nombres_legibles.get(_feature_coef, _feature_coef),
-                            )
-                            _terminos_eq.append(
-                                f"{_beta[_idx_coef]:+.3f}·z({_label_coef})"
-                            )
-
-                        st.code(
-                            "Rendimiento estimado = " + " ".join(_terminos_eq),
-                            language="text",
-                        )
-
-                        st.caption(
-                            "z(variable) usa mediana, escala robusta y peso interno del período base. "
-                            "Si cambiás un coeficiente, la curva estimada se recalcula automáticamente."
-                        )
-
-                # R2 de entrenamiento para confiabilidad general.
-                _y_fit = _x_design @ _beta
-                _ss_res = float(np.nansum((_y_np - _y_fit) ** 2))
-                _ss_tot = float(np.nansum((_y_np - np.nanmean(_y_np)) ** 2))
-
-                if _ss_tot > 0:
-                    _r2 = max(0.0, min(1.0, 1.0 - _ss_res / _ss_tot))
-                else:
-                    _r2 = 0.0
-
-                # Percentil dentro de la base usada.
-                _base_modelo.loc[_x_base.index, "Percentil_rendimiento_base"] = (
-                    pd.Series(_y_np, index=_x_base.index).rank(pct=True) * 100.0
+        if "MFI_polvo" in _features:
+            _base_mask = _base_mask & (
+                pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") > 0.0
+            )
+
+        if "Conc_propano" in _features:
+            _base_mask = _base_mask & (
+                pd.to_numeric(df_agrup["Conc_propano"], errors="coerce") > 0.0
+            )
+
+        if "Conc_H2" in _features:
+            _base_mask = _base_mask & (
+                pd.to_numeric(df_agrup["Conc_H2"], errors="coerce") > 0.0
+            )
+
+        _x_all = df_agrup[_features].copy()
+        for _f in _features:
+            _x_all[_f] = pd.to_numeric(_x_all[_f], errors="coerce")
+
+        # Mediana/IQR del histórico válido para imputar y normalizar.
+        _x_base_tmp = _x_all.loc[_base_mask].copy()
+        _y_base_tmp = _rendimiento.loc[_base_mask].copy()
+
+        # Si el filtro estricto deja muy pocos datos, relajar Nivel/URA pero mantener
+        # presión normal y exclusión de eventos no confiables.
+        if len(_x_base_tmp.dropna(how="all")) < max(int(_k_min_vecinos), 20):
+            _base_mask_relajada = (
+                _presion_ok
+                & _rendimiento.notna()
+                & _fecha.notna()
+            )
+
+            if bool(_excluir_evento_bajo_nivel):
+                _base_mask_relajada = _base_mask_relajada & (~_evento_bajo_nivel)
+
+            if "Slurry" in _features:
+                _base_mask_relajada = _base_mask_relajada & (
+                    pd.to_numeric(df_agrup["Slurry"], errors="coerce") > 50.0
                 )
-                _idx_base_valid = _x_base.index.intersection(df_agrup.index)
-                _percentil_base[df_agrup.index.get_indexer(_idx_base_valid)] = _base_modelo.loc[
-                    _idx_base_valid,
-                    "Percentil_rendimiento_base",
-                ].to_numpy(dtype=float)
 
-                # Aplicar el modelo a todo el rango donde existan las variables.
-                _x_all = df_agrup[_features].copy()
+            if "MFI_polvo" in _features:
+                _base_mask_relajada = _base_mask_relajada & (
+                    pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") > 0.0
+                )
+
+            _base_mask = _base_mask_relajada
+            _x_base_tmp = _x_all.loc[_base_mask].copy()
+            _y_base_tmp = _rendimiento.loc[_base_mask].copy()
+
+        if len(_x_base_tmp) >= max(int(_k_min_vecinos), 10):
+            _med = _x_base_tmp.median(axis=0, skipna=True)
+            _q75 = _x_base_tmp.quantile(0.75)
+            _q25 = _x_base_tmp.quantile(0.25)
+            _escala = (_q75 - _q25).replace(0, np.nan)
+            _escala = _escala.fillna(_x_base_tmp.std(axis=0, skipna=True))
+            _escala = _escala.replace(0, 1.0).fillna(1.0)
+
+            # Neutralizar TEA/C-Donor en puntos sin donor con la mediana del histórico.
+            _x_all = _x_all.fillna(_med)
+
+            _pesos_dict = {
+                "MFI_polvo": 3.5,
+                "XS": 3.0,
+                "Conc_H2": 3.8,
+                "Conc_propano": 4.0,
+                "Slurry": 3.5,
+                "Rel_TEA_CDonor_modelo": 4.5,
+                "C_Donor": 4.0,
+                "Sin_C_Donor_modelo": 5.0,
+                "Temperatura_R2301": 2.8,
+                "Tipo_catalizador_productividad": 2.5,
+                "Indicador_ZN389_activo": 2.5,
+            }
+            _pesos = pd.Series(
+                [_pesos_dict.get(_f, 1.0) for _f in _features],
+                index=_features,
+                dtype=float,
+            )
+
+            _z_all = ((_x_all - _med) / _escala) * np.sqrt(_pesos)
+            _valid_features = _z_all.notna().all(axis=1)
+            _base_final = _base_mask & _valid_features
+
+            _dates_np = _fecha.to_numpy()
+            _y_np_all = _rendimiento.to_numpy(dtype=float)
+            _z_np = _z_all.to_numpy(dtype=float)
+            _base_np = _base_final.to_numpy(dtype=bool)
+
+            def _weighted_quantile(_values, _weights, _quantile):
+                _values = np.asarray(_values, dtype=float)
+                _weights = np.asarray(_weights, dtype=float)
+                _ok = np.isfinite(_values) & np.isfinite(_weights) & (_weights > 0)
+                if _ok.sum() == 0:
+                    return np.nan
+                _values = _values[_ok]
+                _weights = _weights[_ok]
+                _order = np.argsort(_values)
+                _values = _values[_order]
+                _weights = _weights[_order]
+                _cum = np.cumsum(_weights)
+                _total = _cum[-1]
+                if _total <= 0:
+                    return np.nan
+                return float(np.interp(float(_quantile) * _total, _cum, _values))
+
+            _k_min = int(_k_min_vecinos)
+            _k_max = int(max(_k_max_vecinos, _k_min_vecinos))
+            _dias_excl = int(_dias_exclusion_local)
+            _percentil = float(_percentil_vecinos)
+
+            for _i in range(len(df_agrup)):
+                if not np.isfinite(_z_np[_i]).all() or pd.isna(_fecha.iloc[_i]):
+                    continue
+
+                _candidatos = _base_np.copy()
+
+                if _dias_excl > 0:
+                    _dt = (_fecha - _fecha.iloc[_i]).abs()
+                    _candidatos = _candidatos & (_dt > pd.Timedelta(days=_dias_excl))
+
+                if bool(_usar_solo_historico_anterior):
+                    _candidatos = _candidatos & (
+                        _fecha < (_fecha.iloc[_i] - pd.Timedelta(days=_dias_excl))
+                    )
+
+                _idx_cand = np.where(_candidatos)[0]
+
+                # Fallback: si no hay suficiente histórico anterior, usar histórico válido
+                # fuera de la ventana local, pero marcará menor confianza.
+                _uso_fallback = False
+                if len(_idx_cand) < _k_min:
+                    _candidatos = _base_np.copy()
+                    if _dias_excl > 0:
+                        _dt = (_fecha - _fecha.iloc[_i]).abs()
+                        _candidatos = _candidatos & (_dt > pd.Timedelta(days=_dias_excl))
+                    _idx_cand = np.where(_candidatos)[0]
+                    _uso_fallback = True
+
+                if len(_idx_cand) < _k_min:
+                    continue
 
-                for _f in _features:
-                    _x_all[_f] = pd.to_numeric(_x_all[_f], errors="coerce")
+                _dz = _z_np[_idx_cand] - _z_np[_i]
+                _dist = np.sqrt(np.nansum(_dz * _dz, axis=1))
 
-                # Tratamiento especial para campañas sin C-Donor:
-                # TEA/C-Donor es indefinido cuando C-Donor = 0. Si se lo fuerza
-                # a cero, el modelo interpreta una condición artificial extrema
-                # y puede hacer caer el rendimiento estimado de KFM.
-                # Por eso se usa el valor neutro del modelo (mediana del período
-                # base) y se deja que la variable Sin_C_Donor_modelo capture
-                # el efecto de trabajar sin donor.
-                if "Rel_TEA_CDonor_modelo" in _features:
-                    _rel_mediana_modelo = float(_med["Rel_TEA_CDonor_modelo"])
+                _orden = np.argsort(_dist)
+                _k = min(_k_max, max(_k_min, int(np.sqrt(len(_orden)) * 3)), len(_orden))
+                _idx_sel = _idx_cand[_orden[:_k]]
+                _dist_sel = _dist[_orden[:_k]]
+                _y_sel = _y_np_all[_idx_sel]
 
-                    _x_all["Rel_TEA_CDonor_modelo"] = _x_all[
-                        "Rel_TEA_CDonor_modelo"
-                    ].fillna(_rel_mediana_modelo)
+                _ok_y = np.isfinite(_y_sel)
+                if _ok_y.sum() < _k_min:
+                    continue
 
-                    if "Sin_C_Donor_modelo" in _features:
-                        _sin_donor_all = pd.to_numeric(
-                            _x_all["Sin_C_Donor_modelo"],
-                            errors="coerce",
-                        ).fillna(0.0) > 0.5
+                _dist_sel = _dist_sel[_ok_y]
+                _y_sel = _y_sel[_ok_y]
 
-                        _x_all.loc[
-                            _sin_donor_all,
-                            "Rel_TEA_CDonor_modelo",
-                        ] = _rel_mediana_modelo
+                # Pesos de similitud: vecinos más cercanos pesan más.
+                _dist_scale = np.nanmedian(_dist_sel)
+                if not np.isfinite(_dist_scale) or _dist_scale <= 0:
+                    _dist_scale = 1.0
 
-                _valid_all = _x_all.notna().all(axis=1)
-                _idx_all = df_agrup.index[_valid_all].to_numpy()
+                _w = np.exp(-_dist_sel / _dist_scale)
+                _estimado[_i] = _weighted_quantile(_y_sel, _w, _percentil)
+                _n_vecinos_usados[_i] = float(len(_y_sel))
+                _dist_min[_i] = float(np.nanmin(_dist_sel))
 
-                if len(_idx_all) > 0:
-                    _x_all_np = _x_all.loc[_valid_all].to_numpy(dtype=float)
-                    _x_all_std = ((_x_all_np - _med_np) / _escala_np) * np.sqrt(_pesos)
-                    _x_all_design = np.column_stack([np.ones(len(_x_all_std)), _x_all_std])
+                _conf_n = min(1.0, len(_y_sel) / max(float(_k_max), 1.0))
+                _conf_dist = float(np.exp(-np.nanmedian(_dist_sel) / max(len(_features), 1)))
+                _conf_val = 100.0 * (0.55 * _conf_n + 0.45 * _conf_dist)
 
-                    _pred = _x_all_design @ _beta
+                if _uso_fallback:
+                    _conf_val *= 0.65
 
-                    # Corrección de sesgo por grado/producto normalizado.
-                    #
-                    # Problema observado:
-                    # - Para SMD6200 el modelo quedaba subestimado.
-                    # - Para otros grados podía extrapolar demasiado alto.
-                    #
-                    # Criterio:
-                    # - PRODUCTO no entra como variable de la ecuación lineal.
-                    # - Pero se usa para calibrar el sesgo histórico del modelo:
-                    #       sesgo_grado = mediana(Rendimiento real - Rendimiento modelo)
-                    #   calculado con datos confiables del mismo grado.
-                    # - Luego se suma ese sesgo a la predicción del grado.
-                    # - Después siguen aplicándose las bandas históricas por grado.
-                    if (
-                        "Producto" in df_agrup.columns
-                        and "_producto_norm_all" in locals()
-                        and "_mask_producto_ref" in locals()
-                    ):
-                        try:
-                            _pred_series_base = pd.Series(_pred, index=_idx_all)
-                            _producto_bias = {}
-                            _filas_bias = []
+                _conf[_i] = float(np.clip(_conf_val, 0.0, 100.0))
 
-                            _mask_bias_base = (
-                                _mask_producto_bias_ref
-                                if "_mask_producto_bias_ref" in locals()
-                                else _mask_producto_ref
-                            )
-
-                            _idx_bias_ref = df_agrup.index[
-                                _mask_bias_base
-                                & df_agrup.index.isin(_idx_all)
-                            ]
-
-                            if len(_idx_bias_ref) > 0:
-                                _resid_ref = (
-                                    _rendimiento.loc[_idx_bias_ref]
-                                    - _pred_series_base.loc[_idx_bias_ref]
-                                )
-
-                                _df_bias = pd.DataFrame(
-                                    {
-                                        "Producto_norm": _producto_norm_all.loc[_idx_bias_ref],
-                                        "Residual": _resid_ref,
-                                    },
-                                    index=_idx_bias_ref,
-                                ).dropna()
-
-                                for _prod_bias, _grp_bias in _df_bias.groupby("Producto_norm"):
-                                    _r = pd.to_numeric(_grp_bias["Residual"], errors="coerce").dropna()
-
-                                    if len(_r) < 3:
-                                        continue
-
-                                    _bias_raw = float(_r.median())
-
-                                    # Peso por cantidad de datos: evita sobrecorregir grados con poco histórico.
-                                    _peso_n = min(1.0, float(len(_r)) / 8.0)
-
-                                    # Limitar la corrección para no convertir el grado en un target fijo.
-                                    _bias_corr = float(np.clip(_bias_raw * _peso_n, -2.5, 2.5))
-
-                                    _producto_bias[str(_prod_bias)] = {
-                                        "bias": _bias_corr,
-                                        "n": int(len(_r)),
-                                        "bias_raw": _bias_raw,
-                                    }
-
-                                    _filas_bias.append(
-                                        {
-                                            "Producto": str(_prod_bias),
-                                            "n_bias": int(len(_r)),
-                                            "Bias_raw": _bias_raw,
-                                            "Bias_aplicado": _bias_corr,
-                                        }
-                                    )
-
-                                if len(_producto_bias) > 0:
-                                    _producto_pred_bias = (
-                                        df_agrup.loc[_idx_all, "Producto"]
-                                        .astype("string")
-                                        .map(normalizar_producto_operativo)
-                                    )
-
-                                    _pred_bias = _pred.copy()
-
-                                    for _i_bias, _prod_pred_bias in enumerate(_producto_pred_bias):
-                                        if pd.isna(_prod_pred_bias):
-                                            continue
-
-                                        _bias_info = _producto_bias.get(str(_prod_pred_bias))
-
-                                        if not _bias_info:
-                                            continue
-
-                                        _pred_bias[_i_bias] = (
-                                            _pred_bias[_i_bias]
-                                            + float(_bias_info["bias"])
-                                        )
-
-                                    _pred = _pred_bias
-
-                                    # Guardar tabla diagnóstica para mostrarla si el usuario abre el modelo.
-                                    _producto_bias_df = pd.DataFrame(_filas_bias).sort_values("Producto")
-                                else:
-                                    _producto_bias_df = pd.DataFrame()
-
-                        except Exception:
-                            # La corrección por grado es auxiliar. Si algo cambia en el Excel,
-                            # no debe romper la app ni el modelo principal.
-                            _producto_bias_df = pd.DataFrame()
-                    else:
-                        _producto_bias_df = pd.DataFrame()
-
-                    try:
-                        st.session_state["producto_bias_df_modelo"] = _producto_bias_df
-                    except Exception:
-                        pass
-
-                    # Campañas sin C-Donor:
-                    # si el período base no contiene suficientes ejemplos sin donor,
-                    # el coeficiente de Sin_C_Donor_modelo no puede aprender bien
-                    # el efecto real. Operativamente, sin donor no debería bajar
-                    # el rendimiento estimado; por eso se aplica un piso alto de
-                    # referencia tomado del propio período confiable.
-                    if "Sin_C_Donor_modelo" in _features:
-                        _sin_donor_pred = pd.to_numeric(
-                            _x_all.loc[_valid_all, "Sin_C_Donor_modelo"],
-                            errors="coerce",
-                        ).fillna(0.0).to_numpy(dtype=float) > 0.5
-
-                        if np.any(_sin_donor_pred):
-                            # Referencia sin donor definida en el panel del modelo.
-                            # Antes se usaba como piso con np.maximum(), pero eso dejaba
-                            # pasar picos altos irreales del modelo lineal.
-                            #
-                            # Nueva lógica:
-                            # - Para KFM/sin donor, la predicción se aproxima a la referencia
-                            #   observada abr/may-2026.
-                            # - Se permite solo una corrección moderada del modelo.
-                            # - Luego se acota entre mínimo y máximo editables.
-                            _ref_kfm = float(_ref_sin_donor_edit)
-                            _min_kfm = float(_kfm_min_edit)
-                            _max_kfm = float(_kfm_max_edit)
-
-                            _pred_sin_donor = (
-                                0.70 * _ref_kfm
-                                + 0.30 * _pred
-                            )
-                            _pred_sin_donor = np.clip(
-                                _pred_sin_donor,
-                                _min_kfm,
-                                _max_kfm,
-                            )
-
-                            _pred = np.where(
-                                _sin_donor_pred,
-                                _pred_sin_donor,
-                                _pred,
-                            )
-
-                    # Aplicar calibración local por grado.
-                    #
-                    # No se empuja siempre hacia la mediana del grado, porque eso
-                    # subestima casos altos reales como KYD6110. En su lugar:
-                    # - se buscan vecinos históricos del mismo grado con variables
-                    #   de proceso similares,
-                    # - se usa el percentil configurable de esos vecinos como referencia local,
-                    # - se combina con el modelo,
-                    # - y finalmente se aplica la banda de plausibilidad.
-                    if "Producto" in df_agrup.columns and isinstance(_producto_stats, dict) and len(_producto_stats) > 0:
-                        _producto_pred = (
-                            df_agrup.loc[_idx_all, "Producto"]
-                            .astype("string")
-                            .map(normalizar_producto_operativo)
-                        )
-
-                        _pred_corregida_producto = _pred.copy()
-
-                        try:
-                            _x_all_std_df = pd.DataFrame(
-                                _x_all_std,
-                                index=_idx_all,
-                                columns=_features,
-                            )
-                        except Exception:
-                            _x_all_std_df = pd.DataFrame()
-
-                        _filas_local_ref = []
-
-                        for _i_pred, _prod_pred in enumerate(_producto_pred):
-                            if pd.isna(_prod_pred):
-                                continue
-
-                            _stat_prod = _producto_stats.get(str(_prod_pred))
-
-                            if not _stat_prod:
-                                continue
-
-                            _idx_pred_actual = _idx_all[_i_pred]
-                            _lim_inf_prod = float(_stat_prod["lim_inf"])
-                            _lim_sup_prod = float(_stat_prod["lim_sup"])
-                            _med_prod = float(_stat_prod["mediana"])
-                            _n_prod = int(_stat_prod.get("n", 0))
-
-                            _pred_actual = float(_pred_corregida_producto[_i_pred])
-                            _ref_local = np.nan
-                            _n_vecinos = 0
-
-                            if (
-                                isinstance(_x_all_std_df, pd.DataFrame)
-                                and len(_x_all_std_df) > 0
-                                and "_producto_norm_all" in locals()
-                                and "_mask_producto_bias_ref" in locals()
-                            ):
-                                try:
-                                    _mask_ref_local = (
-                                        _mask_producto_bias_ref
-                                        & _producto_norm_all.astype("string").eq(str(_prod_pred)).fillna(False)
-                                        & df_agrup.index.isin(_x_all_std_df.index)
-                                        & (df_agrup.index != _idx_pred_actual)
-                                    )
-
-                                    _idx_ref_local = df_agrup.index[_mask_ref_local]
-
-                                    if len(_idx_ref_local) >= 3 and _idx_pred_actual in _x_all_std_df.index:
-                                        _x_ref_local = _x_all_std_df.loc[_idx_ref_local]
-                                        _x_actual_local = _x_all_std_df.loc[_idx_pred_actual]
-
-                                        _dist_local = ((_x_ref_local - _x_actual_local) ** 2).sum(axis=1)
-                                        _k_local = min(max(4, len(_idx_ref_local) // 3), 12, len(_idx_ref_local))
-                                        _idx_nn_local = _dist_local.sort_values().index[:_k_local]
-
-                                        _y_nn_local = pd.to_numeric(
-                                            _rendimiento.loc[_idx_nn_local],
-                                            errors="coerce",
-                                        ).dropna()
-
-                                        _n_vecinos = int(len(_y_nn_local))
-
-                                        if _n_vecinos >= 3:
-                                            # Referencia buena pero no extrema para condiciones similares.
-                                            # Se usa el percentil configurable del panel del modelo.
-                                            _ref_local = float(
-                                                _y_nn_local.quantile(float(_percentil_ref_local_edit))
-                                            )
-
-                                except Exception:
-                                    _ref_local = np.nan
-                                    _n_vecinos = 0
-
-                            if np.isfinite(_ref_local):
-                                # Si hay vecinos del mismo grado, confiar fuerte en esa
-                                # referencia local porque representa campañas comparables.
-                                if _n_vecinos >= 8:
-                                    _peso_modelo_grado = 0.10
-                                else:
-                                    _peso_modelo_grado = 0.20
-
-                                _pred_blend = (
-                                    _peso_modelo_grado * _pred_actual
-                                    + (1.0 - _peso_modelo_grado) * _ref_local
-                                )
-                            else:
-                                # Sin referencia local suficiente, no tirar a la mediana pura:
-                                # usar una referencia histórica alta del grado.
-                                _q90_prod = float(_stat_prod.get("q90", _med_prod))
-                                _ref_grado_alta = (
-                                    0.35 * _med_prod
-                                    + 0.65 * _q90_prod
-                                )
-
-                                if _n_prod >= 8:
-                                    _peso_modelo_grado = 0.45
-                                elif _n_prod >= 4:
-                                    _peso_modelo_grado = 0.55
-                                else:
-                                    _peso_modelo_grado = 0.65
-
-                                _pred_blend = (
-                                    _peso_modelo_grado * _pred_actual
-                                    + (1.0 - _peso_modelo_grado) * _ref_grado_alta
-                                )
-
-                            _pred_corregida_producto[_i_pred] = np.clip(
-                                _pred_blend,
-                                _lim_inf_prod,
-                                _lim_sup_prod,
-                            )
-
-                            _filas_local_ref.append(
-                                {
-                                    "Producto": str(_prod_pred),
-                                    "Fecha": df_agrup.loc[_idx_pred_actual, "Fecha_y_hora"] if "Fecha_y_hora" in df_agrup.columns else _idx_pred_actual,
-                                    "Pred_modelo": _pred_actual,
-                                    "Ref_local": _ref_local,
-                                    "Percentil_ref": float(_percentil_ref_local_edit),
-                                    "n_vecinos": _n_vecinos,
-                                    "Mediana_grado": _med_prod,
-                                    "Pred_corregida": float(_pred_corregida_producto[_i_pred]),
-                                    "Lim_inf": _lim_inf_prod,
-                                    "Lim_sup": _lim_sup_prod,
-                                }
-                            )
-
-                        _pred = _pred_corregida_producto
-
-                        try:
-                            st.session_state["producto_ref_local_df_modelo"] = pd.DataFrame(_filas_local_ref)
-                        except Exception:
-                            pass
-
-                    # Corrección por campaña continua del mismo grado.
-                    #
-                    # Si una campaña queda sistemáticamente por debajo/arriba del
-                    # estimado, se aplica una corrección limitada. Para evitar que una
-                    # campaña larga mezcle zonas con comportamiento distinto, primero
-                    # se calcula un sesgo local en una ventana de días; si no hay
-                    # puntos suficientes, se usa el sesgo mediano de toda la campaña.
-                    try:
-                        _campania_bias_df = pd.DataFrame()
-
-                        if (
-                            bool(_usar_correccion_campania)
-                            and "Producto" in df_agrup.columns
-                            and "Fecha_y_hora" in df_agrup.columns
-                            and len(_idx_all) > 0
-                        ):
-                            _df_camp = pd.DataFrame(
-                                {
-                                    "Fecha_y_hora": pd.to_datetime(
-                                        df_agrup.loc[_idx_all, "Fecha_y_hora"],
-                                        errors="coerce",
-                                    ),
-                                    "Producto_norm": (
-                                        df_agrup.loc[_idx_all, "Producto"]
-                                        .astype("string")
-                                        .map(normalizar_producto_operativo)
-                                    ),
-                                    "Real": pd.to_numeric(
-                                        _rendimiento.loc[_idx_all],
-                                        errors="coerce",
-                                    ),
-                                    "Estimado_pre_campania": _pred,
-                                },
-                                index=_idx_all,
-                            ).dropna(subset=["Fecha_y_hora", "Producto_norm"])
-
-                            _df_camp = _df_camp.sort_values("Fecha_y_hora")
-
-                            _gap = _df_camp["Fecha_y_hora"].diff()
-                            _cambio_producto = (
-                                _df_camp["Producto_norm"].astype(str)
-                                != _df_camp["Producto_norm"].astype(str).shift()
-                            )
-
-                            # Separar campañas si hay cambio de producto o gap grande.
-                            # Se baja el corte a 10 días para no mezclar campañas separadas
-                            # que tengan el mismo grado pero distinta condición operativa.
-                            _corte_gap = _gap > pd.Timedelta(days=10)
-                            _df_camp["Campania_id"] = (
-                                (_cambio_producto | _corte_gap.fillna(False))
-                                .cumsum()
-                            )
-
-                            _pred_camp_corr = pd.Series(_pred, index=_idx_all, dtype=float)
-                            _filas_campania = []
-
-                            _ventana_dias = int(_ventana_correccion_campania)
-                            _ventana_td = pd.Timedelta(days=_ventana_dias)
-                            _peso_camp = float(_peso_correccion_campania)
-                            _lim_camp = float(_limite_correccion_campania)
-
-                            for _camp_id, _grp_camp in _df_camp.groupby("Campania_id"):
-                                _grp_valid = _grp_camp.dropna(
-                                    subset=["Real", "Estimado_pre_campania"]
-                                ).copy()
-
-                                if len(_grp_valid) < 3:
-                                    continue
-
-                                _grp_valid["Residual"] = (
-                                    pd.to_numeric(_grp_valid["Real"], errors="coerce")
-                                    - pd.to_numeric(_grp_valid["Estimado_pre_campania"], errors="coerce")
-                                )
-
-                                _grp_valid = _grp_valid.dropna(subset=["Residual"])
-
-                                if len(_grp_valid) < 3:
-                                    continue
-
-                                _bias_camp = float(_grp_valid["Residual"].median())
-
-                                _correcciones_punto = []
-
-                                for _idx_punto, _fila_punto in _grp_valid.iterrows():
-                                    _fecha_punto = _fila_punto["Fecha_y_hora"]
-
-                                    _mask_local = (
-                                        (_grp_valid["Fecha_y_hora"] >= (_fecha_punto - _ventana_td))
-                                        & (_grp_valid["Fecha_y_hora"] <= (_fecha_punto + _ventana_td))
-                                    )
-
-                                    _resid_local = _grp_valid.loc[_mask_local, "Residual"].dropna()
-
-                                    if len(_resid_local) >= 3:
-                                        _bias_usado = float(_resid_local.median())
-                                        _tipo_bias = "local"
-                                        _n_bias = int(len(_resid_local))
-                                    else:
-                                        _bias_usado = _bias_camp
-                                        _tipo_bias = "campaña"
-                                        _n_bias = int(len(_grp_valid))
-
-                                    _correccion_punto = float(
-                                        np.clip(
-                                            _bias_usado * _peso_camp,
-                                            -_lim_camp,
-                                            _lim_camp,
-                                        )
-                                    )
-
-                                    _pred_camp_corr.loc[_idx_punto] = (
-                                        _pred_camp_corr.loc[_idx_punto]
-                                        + _correccion_punto
-                                    )
-
-                                    _correcciones_punto.append(
-                                        {
-                                            "Correccion": _correccion_punto,
-                                            "Bias_usado": _bias_usado,
-                                            "Tipo_bias": _tipo_bias,
-                                            "n_bias": _n_bias,
-                                        }
-                                    )
-
-                                _corr_df = pd.DataFrame(_correcciones_punto)
-
-                                _filas_campania.append(
-                                    {
-                                        "Producto": str(_grp_camp["Producto_norm"].iloc[0]),
-                                        "Desde": _grp_camp["Fecha_y_hora"].min(),
-                                        "Hasta": _grp_camp["Fecha_y_hora"].max(),
-                                        "n": int(len(_grp_valid)),
-                                        "Bias_campania": _bias_camp,
-                                        "Correccion_mediana": float(_corr_df["Correccion"].median()) if len(_corr_df) else np.nan,
-                                        "Correccion_min": float(_corr_df["Correccion"].min()) if len(_corr_df) else np.nan,
-                                        "Correccion_max": float(_corr_df["Correccion"].max()) if len(_corr_df) else np.nan,
-                                        "Ventana_dias": _ventana_dias,
-                                        "Uso_local_%": float((_corr_df["Tipo_bias"].eq("local").mean() * 100.0)) if len(_corr_df) else 0.0,
-                                    }
-                                )
-
-                            _pred = _pred_camp_corr.loc[_idx_all].to_numpy(dtype=float)
-
-                            if _filas_campania:
-                                _campania_bias_df = pd.DataFrame(_filas_campania)
-
-                        st.session_state["campania_bias_df_modelo"] = _campania_bias_df
-
-                    except Exception:
-                        # La corrección por campaña es auxiliar y no debe romper el modelo.
-                        pass
-
-                    # Evitar extrapolaciones absurdas globales: permitir margen alrededor
-                    # del rango de la base, pero no valores físicamente irreales.
-                    _y_min = float(np.nanmin(_y_np))
-                    _y_max = float(np.nanmax(_y_np))
-                    _margen_y = max((_y_max - _y_min) * 0.60, 2.0)
-                    _pred = np.clip(_pred, _y_min - _margen_y, _y_max + _margen_y)
-
-                    # Distancia a la nube base para confiabilidad.
-                    _dist = (
-                        (_x_all_std[:, None, :] - _x_std[None, :, :]) ** 2
-                    ).sum(axis=2)
-                    _distancia_min = np.nanmin(_dist, axis=1)
-
-                    _pos_all = df_agrup.index.get_indexer(_idx_all)
-                    _estimado[_pos_all] = _pred
-                    _dist_min[_pos_all] = _distancia_min
-
-                    _conf_dist = 100.0 * np.exp(-_distancia_min / max(len(_features), 1))
-                    _conf_r2 = 35.0 + 65.0 * _r2
-                    _conf_modelo = np.minimum(_conf_r2, _conf_dist + 25.0)
-
-                    # Penalizar puntos fuera de presión normal.
-                    _pres_ok_all = _presion_ok.loc[_idx_all].to_numpy()
-                    _conf_modelo = np.where(_pres_ok_all, _conf_modelo, _conf_modelo * 0.4)
-
-                    _conf[_pos_all] = _conf_modelo
-
-                # Marcar el período usado como base.
-                _pos_train = df_agrup.index.get_indexer(_idx_base)
-                _target_flag[_pos_train] = 1.0
+            _indicador_base[_base_final.to_numpy(dtype=bool)] = 1.0
 
     df_agrup["Productividad_estimada"] = pd.Series(_estimado, index=df_agrup.index)
     df_agrup["Rendimiento_esperado_producto"] = pd.Series(_estimado, index=df_agrup.index)
 
-    # Variables internas mantenidas por compatibilidad.
+    # Variables auxiliares mantenidas por compatibilidad con el resto de la app.
     df_agrup["Target_operativo_producto"] = np.nan
     df_agrup["Maximo_historico_validado_producto"] = np.nan
     df_agrup["Distancia_benchmark_productividad"] = pd.Series(_dist_min, index=df_agrup.index)
     df_agrup["Confiabilidad_benchmark_productividad"] = pd.Series(_conf, index=df_agrup.index)
-    df_agrup["Indicador_target_optimo_productividad"] = pd.Series(_target_flag, index=df_agrup.index)
-    df_agrup["Percentil_rendimiento_base"] = pd.Series(_percentil_base, index=df_agrup.index)
+    df_agrup["N_vecinos_benchmark_productividad"] = pd.Series(_n_vecinos_usados, index=df_agrup.index)
+    df_agrup["Indicador_target_optimo_productividad"] = pd.Series(_indicador_base, index=df_agrup.index)
+    df_agrup["Percentil_rendimiento_base"] = np.nan
 
     df_agrup["Desvio_vs_productividad_estimada"] = (
         pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
@@ -2970,8 +1862,6 @@ if unidad.startswith("Polimer") and all(
         / pd.to_numeric(df_agrup["Productividad_estimada"], errors="coerce")
     ).replace([np.inf, -np.inf], np.nan)
 
-    # Señal simple para revisar posible pérdida de actividad:
-    # desvío negativo sostenido mayor a 1 punto respecto del benchmark sano.
     _desvio_tmp = pd.to_numeric(
         df_agrup["Desvio_vs_productividad_estimada"],
         errors="coerce",
@@ -2985,12 +1875,11 @@ if unidad.startswith("Polimer") and all(
 
     df_agrup["Gap_vs_target_operativo"] = np.nan
     df_agrup["Gap_vs_maximo_historico"] = np.nan
-
-    if "Presion_operacion_OK" in df_agrup.columns:
-        df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
-
-    if "Periodo_base_productividad_2024" in df_agrup.columns:
-        df_agrup["Periodo_base_productividad_2024"] = np.where(_periodo_base_modelo, 1.0, 0.0)
+    df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
+    df_agrup["Periodo_base_productividad_2024"] = pd.Series(
+        _indicador_base,
+        index=df_agrup.index,
+    )
 
 
 # Mascara inicial: rango de fechas
