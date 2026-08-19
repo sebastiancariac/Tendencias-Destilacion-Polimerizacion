@@ -22,6 +22,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+try:
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import make_pipeline
+    SKLEARN_DISPONIBLE = True
+except Exception:
+    GradientBoostingRegressor = None
+    SimpleImputer = None
+    make_pipeline = None
+    SKLEARN_DISPONIBLE = False
+
 
 # ==============================================================================
 # CONFIGURACION GENERAL
@@ -1436,14 +1447,21 @@ filtro_producto_activo = unidad.startswith("Polimer") and len(productos_sel) > 0
 
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
-# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR VECINOS DE VARIABLES CRITICAS
+
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR VARIABLES CRITICAS
 #
 # Criterio conceptual:
 # - El rendimiento estimado NO depende del cambio de lecho.
 # - El rendimiento estimado NO se corrige contra el rendimiento real de la campaña actual.
-# - El estimado se calcula por similitud de variables críticas de proceso/catalizador.
+# - El estimado se calcula por variables críticas de proceso/catalizador.
 # - El desvío Real - Estimado se usa como señal de posible pérdida de actividad,
 #   contaminante o necesidad de revisar/cambiar lechos.
+#
+# Cambio principal de esta versión:
+# - Se reemplaza el estimador por vecinos como método principal porque tendía a
+#   generar una curva demasiado plana.
+# - El método default es Gradient Boosting quantile, que captura respuestas no
+#   lineales de MFI, H2, propano, donor, slurry, temperatura, etc.
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
     for col in [
@@ -1463,64 +1481,76 @@ if unidad.startswith("Polimer") and all(
 
         with st.expander("Benchmark por variables críticas", expanded=True):
             st.caption(
-                "El estimado se calcula con puntos históricos de condiciones de proceso similares. "
-                "No usa la fecha de cambio de lecho como variable y no se ajusta contra el real de la campaña actual."
+                "El estimado se calcula con variables críticas de proceso/catalizador. "
+                "No usa cambio de lecho como variable y no se ajusta contra el real de la campaña actual."
             )
 
-            _percentil_vecinos = st.number_input(
-                "Percentil de vecinos similares",
-                min_value=0.30,
-                max_value=0.90,
-                value=0.60,
-                step=0.05,
-                format="%.2f",
-                key="percentil_vecinos_rendimiento_estimado",
+            _metodo_estimacion = st.selectbox(
+                "Método de estimación",
+                options=[
+                    "Gradient Boosting quantile",
+                    "Gradient Boosting promedio",
+                ],
+                index=0,
+                key="metodo_estimacion_rendimiento",
                 help=(
-                    "Percentil del rendimiento histórico entre puntos con variables críticas similares. "
-                    "0.50 es mediana; 0.60/0.65 es un benchmark algo exigente."
+                    "Gradient Boosting captura relaciones no lineales. "
+                    "Quantile usa un percentil configurable como benchmark esperado."
                 ),
             )
 
-            c_knn_1, c_knn_2 = st.columns(2)
-            with c_knn_1:
-                _k_min_vecinos = st.number_input(
-                    "Mín. vecinos",
-                    min_value=5,
-                    max_value=80,
-                    value=12,
-                    step=1,
-                    key="k_min_vecinos_rendimiento",
+            _percentil_benchmark = st.number_input(
+                "Percentil benchmark",
+                min_value=0.40,
+                max_value=0.90,
+                value=0.65,
+                step=0.05,
+                format="%.2f",
+                key="percentil_benchmark_gbr",
+                help=(
+                    "Percentil usado por el modelo quantile. "
+                    "0.50 se aproxima a mediana; 0.65/0.70 es un benchmark algo exigente."
+                ),
+            )
+
+            c_gbr_1, c_gbr_2 = st.columns(2)
+            with c_gbr_1:
+                _gbr_n_estimators = st.number_input(
+                    "Árboles",
+                    min_value=80,
+                    max_value=800,
+                    value=300,
+                    step=20,
+                    key="gbr_n_estimators_rendimiento",
                 )
-            with c_knn_2:
-                _k_max_vecinos = st.number_input(
-                    "Máx. vecinos",
-                    min_value=10,
-                    max_value=200,
-                    value=60,
-                    step=5,
-                    key="k_max_vecinos_rendimiento",
+            with c_gbr_2:
+                _gbr_max_depth = st.number_input(
+                    "Profundidad",
+                    min_value=2,
+                    max_value=5,
+                    value=3,
+                    step=1,
+                    key="gbr_max_depth_rendimiento",
                 )
 
-            c_hist_1, c_hist_2 = st.columns(2)
-            with c_hist_1:
-                _usar_solo_historico_anterior = st.checkbox(
-                    "Solo histórico anterior",
+            c_train_1, c_train_2 = st.columns(2)
+            with c_train_1:
+                _solo_historico_anterior = st.checkbox(
+                    "Entrenar solo con datos anteriores al rango visible",
                     value=True,
-                    key="solo_historico_anterior_rendimiento",
+                    key="gbr_solo_historico_anterior",
                     help=(
-                        "Recomendado para diagnóstico: estima cada punto usando datos anteriores, "
-                        "evitando que la campaña actual se use para calibrarse a sí misma."
+                        "Evita que el período que estás evaluando se use para calibrar su propio estimado."
                     ),
                 )
-            with c_hist_2:
-                _dias_exclusion_local = st.number_input(
-                    "Exclusión local [días]",
+            with c_train_2:
+                _dias_exclusion_entrenamiento = st.number_input(
+                    "Exclusión antes del rango [días]",
                     min_value=0,
                     max_value=90,
                     value=14,
                     step=1,
-                    key="dias_exclusion_local_rendimiento",
-                    help="Días alrededor del punto evaluado que se excluyen del conjunto de referencia.",
+                    key="gbr_dias_exclusion_entrenamiento",
                 )
 
             st.markdown("**Exclusiones por datos no confiables**")
@@ -1548,6 +1578,21 @@ if unidad.startswith("Polimer") and all(
                     key="fin_evento_bajo_nivel_modelo",
                 )
 
+            _min_puntos_entrenamiento = st.number_input(
+                "Mínimo puntos entrenamiento",
+                min_value=30,
+                max_value=2000,
+                value=120,
+                step=10,
+                key="min_puntos_entrenamiento_gbr",
+            )
+
+            if not SKLEARN_DISPONIBLE:
+                st.error(
+                    "scikit-learn no está disponible. Agregá scikit-learn a requirements.txt "
+                    "o usá la versión anterior."
+                )
+
             st.info(
                 "Uso diagnóstico: si Real - Estimado es negativo de forma sostenida, "
                 "puede indicar pérdida de actividad del catalizador por contaminante o necesidad de revisar lechos."
@@ -1569,7 +1614,7 @@ if unidad.startswith("Polimer") and all(
         df_agrup["Sin_C_Donor_modelo"] = np.nan
 
     # Relación TEA/C-Donor. Cuando no hay donor, la relación es indefinida:
-    # se neutraliza luego con la mediana del conjunto de referencia.
+    # se deja en NaN y el imputador del modelo usa la mediana del histórico válido.
     _rel_excel = None
     if "Rel_TEA_CDonor" in df_agrup.columns:
         _rel_excel = pd.to_numeric(df_agrup["Rel_TEA_CDonor"], errors="coerce")
@@ -1619,7 +1664,7 @@ if unidad.startswith("Polimer") and all(
     for _f in _features_candidatas:
         if _f in df_agrup.columns:
             _serie = pd.to_numeric(df_agrup[_f], errors="coerce")
-            if _serie.notna().sum() >= max(10, int(_k_min_vecinos)):
+            if _serie.notna().sum() >= 20:
                 _features.append(_f)
 
     _estimado = np.full(len(df_agrup), np.nan)
@@ -1627,8 +1672,10 @@ if unidad.startswith("Polimer") and all(
     _dist_min = np.full(len(df_agrup), np.nan)
     _n_vecinos_usados = np.full(len(df_agrup), np.nan)
     _indicador_base = np.zeros(len(df_agrup))
+    _modelo_status = "Sin modelo"
+    _n_train = 0
 
-    if len(_features) >= 3:
+    if len(_features) >= 3 and SKLEARN_DISPONIBLE:
         # Conjunto histórico válido. Se excluyen datos malos, no cambios de lecho.
         _base_mask = (
             _presion_ok
@@ -1647,6 +1694,11 @@ if unidad.startswith("Polimer") and all(
                 )
             )
             _base_mask = _base_mask & (~_evento_bajo_nivel)
+
+        # Evitar auto-calibración del rango visible.
+        if bool(_solo_historico_anterior):
+            _inicio_visible = pd.Timestamp(desde) - pd.Timedelta(days=int(_dias_exclusion_entrenamiento))
+            _base_mask = _base_mask & (_fecha < _inicio_visible)
 
         # Filtros de operación normal si existen.
         if "Nivel_R2301" in df_agrup.columns:
@@ -1681,164 +1733,71 @@ if unidad.startswith("Polimer") and all(
         for _f in _features:
             _x_all[_f] = pd.to_numeric(_x_all[_f], errors="coerce")
 
-        # Mediana/IQR del histórico válido para imputar y normalizar.
-        _x_base_tmp = _x_all.loc[_base_mask].copy()
-        _y_base_tmp = _rendimiento.loc[_base_mask].copy()
+        # El modelo acepta NaN por imputación, pero se exige que cada fila tenga
+        # una cantidad mínima de variables críticas observadas.
+        _min_features_validas = max(3, int(np.ceil(len(_features) * 0.55)))
+        _filas_con_features = _x_all.notna().sum(axis=1) >= _min_features_validas
+        _base_final = _base_mask & _filas_con_features
 
-        # Si el filtro estricto deja muy pocos datos, relajar Nivel/URA pero mantener
-        # presión normal y exclusión de eventos no confiables.
-        if len(_x_base_tmp.dropna(how="all")) < max(int(_k_min_vecinos), 20):
-            _base_mask_relajada = (
-                _presion_ok
-                & _rendimiento.notna()
-                & _fecha.notna()
+        _n_train = int(_base_final.sum())
+
+        if _n_train >= int(_min_puntos_entrenamiento):
+            _x_train = _x_all.loc[_base_final, _features]
+            _y_train = _rendimiento.loc[_base_final]
+
+            if _metodo_estimacion.startswith("Gradient Boosting quantile"):
+                _reg = GradientBoostingRegressor(
+                    loss="quantile",
+                    alpha=float(_percentil_benchmark),
+                    n_estimators=int(_gbr_n_estimators),
+                    max_depth=int(_gbr_max_depth),
+                    learning_rate=0.03,
+                    min_samples_leaf=5,
+                    random_state=42,
+                )
+                _modelo_status = f"Gradient Boosting quantile P{int(float(_percentil_benchmark) * 100)}"
+            else:
+                _reg = GradientBoostingRegressor(
+                    loss="absolute_error",
+                    n_estimators=int(_gbr_n_estimators),
+                    max_depth=int(_gbr_max_depth),
+                    learning_rate=0.03,
+                    min_samples_leaf=5,
+                    random_state=42,
+                )
+                _modelo_status = "Gradient Boosting promedio robusto"
+
+            _modelo = make_pipeline(
+                SimpleImputer(strategy="median"),
+                _reg,
             )
 
-            if bool(_excluir_evento_bajo_nivel):
-                _base_mask_relajada = _base_mask_relajada & (~_evento_bajo_nivel)
+            try:
+                _modelo.fit(_x_train, _y_train)
+                _pred = _modelo.predict(_x_all[_features])
 
-            if "Slurry" in _features:
-                _base_mask_relajada = _base_mask_relajada & (
-                    pd.to_numeric(df_agrup["Slurry"], errors="coerce") > 50.0
+                # Evitar extrapolaciones absurdas fuera del rango histórico válido.
+                _q01 = float(_y_train.quantile(0.01))
+                _q99 = float(_y_train.quantile(0.99))
+                _iqr_y = float(_y_train.quantile(0.75) - _y_train.quantile(0.25))
+                _margen_y = max(1.50, 0.75 * _iqr_y)
+
+                _pred = np.clip(
+                    _pred,
+                    _q01 - _margen_y,
+                    _q99 + _margen_y,
                 )
 
-            if "MFI_polvo" in _features:
-                _base_mask_relajada = _base_mask_relajada & (
-                    pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") > 0.0
-                )
+                _estimado = _pred.astype(float)
 
-            _base_mask = _base_mask_relajada
-            _x_base_tmp = _x_all.loc[_base_mask].copy()
-            _y_base_tmp = _rendimiento.loc[_base_mask].copy()
+                # Diagnóstico simple de confianza.
+                _conf_base = min(100.0, 100.0 * _n_train / max(float(_min_puntos_entrenamiento), 1.0))
+                _conf[:] = _conf_base
+                _n_vecinos_usados[:] = float(_n_train)
+                _indicador_base[_base_final.to_numpy(dtype=bool)] = 1.0
 
-        if len(_x_base_tmp) >= max(int(_k_min_vecinos), 10):
-            _med = _x_base_tmp.median(axis=0, skipna=True)
-            _q75 = _x_base_tmp.quantile(0.75)
-            _q25 = _x_base_tmp.quantile(0.25)
-            _escala = (_q75 - _q25).replace(0, np.nan)
-            _escala = _escala.fillna(_x_base_tmp.std(axis=0, skipna=True))
-            _escala = _escala.replace(0, 1.0).fillna(1.0)
-
-            # Neutralizar TEA/C-Donor en puntos sin donor con la mediana del histórico.
-            _x_all = _x_all.fillna(_med)
-
-            _pesos_dict = {
-                "MFI_polvo": 3.5,
-                "XS": 3.0,
-                "Conc_H2": 3.8,
-                "Conc_propano": 4.0,
-                "Slurry": 3.5,
-                "Rel_TEA_CDonor_modelo": 4.5,
-                "C_Donor": 4.0,
-                "Sin_C_Donor_modelo": 5.0,
-                "Temperatura_R2301": 2.8,
-                "Tipo_catalizador_productividad": 2.5,
-                "Indicador_ZN389_activo": 2.5,
-            }
-            _pesos = pd.Series(
-                [_pesos_dict.get(_f, 1.0) for _f in _features],
-                index=_features,
-                dtype=float,
-            )
-
-            _z_all = ((_x_all - _med) / _escala) * np.sqrt(_pesos)
-            _valid_features = _z_all.notna().all(axis=1)
-            _base_final = _base_mask & _valid_features
-
-            _dates_np = _fecha.to_numpy()
-            _y_np_all = _rendimiento.to_numpy(dtype=float)
-            _z_np = _z_all.to_numpy(dtype=float)
-            _base_np = _base_final.to_numpy(dtype=bool)
-
-            def _weighted_quantile(_values, _weights, _quantile):
-                _values = np.asarray(_values, dtype=float)
-                _weights = np.asarray(_weights, dtype=float)
-                _ok = np.isfinite(_values) & np.isfinite(_weights) & (_weights > 0)
-                if _ok.sum() == 0:
-                    return np.nan
-                _values = _values[_ok]
-                _weights = _weights[_ok]
-                _order = np.argsort(_values)
-                _values = _values[_order]
-                _weights = _weights[_order]
-                _cum = np.cumsum(_weights)
-                _total = _cum[-1]
-                if _total <= 0:
-                    return np.nan
-                return float(np.interp(float(_quantile) * _total, _cum, _values))
-
-            _k_min = int(_k_min_vecinos)
-            _k_max = int(max(_k_max_vecinos, _k_min_vecinos))
-            _dias_excl = int(_dias_exclusion_local)
-            _percentil = float(_percentil_vecinos)
-
-            for _i in range(len(df_agrup)):
-                if not np.isfinite(_z_np[_i]).all() or pd.isna(_fecha.iloc[_i]):
-                    continue
-
-                _candidatos = _base_np.copy()
-
-                if _dias_excl > 0:
-                    _dt = (_fecha - _fecha.iloc[_i]).abs()
-                    _candidatos = _candidatos & (_dt > pd.Timedelta(days=_dias_excl))
-
-                if bool(_usar_solo_historico_anterior):
-                    _candidatos = _candidatos & (
-                        _fecha < (_fecha.iloc[_i] - pd.Timedelta(days=_dias_excl))
-                    )
-
-                _idx_cand = np.where(_candidatos)[0]
-
-                # Fallback: si no hay suficiente histórico anterior, usar histórico válido
-                # fuera de la ventana local, pero marcará menor confianza.
-                _uso_fallback = False
-                if len(_idx_cand) < _k_min:
-                    _candidatos = _base_np.copy()
-                    if _dias_excl > 0:
-                        _dt = (_fecha - _fecha.iloc[_i]).abs()
-                        _candidatos = _candidatos & (_dt > pd.Timedelta(days=_dias_excl))
-                    _idx_cand = np.where(_candidatos)[0]
-                    _uso_fallback = True
-
-                if len(_idx_cand) < _k_min:
-                    continue
-
-                _dz = _z_np[_idx_cand] - _z_np[_i]
-                _dist = np.sqrt(np.nansum(_dz * _dz, axis=1))
-
-                _orden = np.argsort(_dist)
-                _k = min(_k_max, max(_k_min, int(np.sqrt(len(_orden)) * 3)), len(_orden))
-                _idx_sel = _idx_cand[_orden[:_k]]
-                _dist_sel = _dist[_orden[:_k]]
-                _y_sel = _y_np_all[_idx_sel]
-
-                _ok_y = np.isfinite(_y_sel)
-                if _ok_y.sum() < _k_min:
-                    continue
-
-                _dist_sel = _dist_sel[_ok_y]
-                _y_sel = _y_sel[_ok_y]
-
-                # Pesos de similitud: vecinos más cercanos pesan más.
-                _dist_scale = np.nanmedian(_dist_sel)
-                if not np.isfinite(_dist_scale) or _dist_scale <= 0:
-                    _dist_scale = 1.0
-
-                _w = np.exp(-_dist_sel / _dist_scale)
-                _estimado[_i] = _weighted_quantile(_y_sel, _w, _percentil)
-                _n_vecinos_usados[_i] = float(len(_y_sel))
-                _dist_min[_i] = float(np.nanmin(_dist_sel))
-
-                _conf_n = min(1.0, len(_y_sel) / max(float(_k_max), 1.0))
-                _conf_dist = float(np.exp(-np.nanmedian(_dist_sel) / max(len(_features), 1)))
-                _conf_val = 100.0 * (0.55 * _conf_n + 0.45 * _conf_dist)
-
-                if _uso_fallback:
-                    _conf_val *= 0.65
-
-                _conf[_i] = float(np.clip(_conf_val, 0.0, 100.0))
-
-            _indicador_base[_base_final.to_numpy(dtype=bool)] = 1.0
+            except Exception as _exc_modelo:
+                _modelo_status = f"Error modelo: {_exc_modelo}"
 
     df_agrup["Productividad_estimada"] = pd.Series(_estimado, index=df_agrup.index)
     df_agrup["Rendimiento_esperado_producto"] = pd.Series(_estimado, index=df_agrup.index)
@@ -1880,6 +1839,19 @@ if unidad.startswith("Polimer") and all(
         _indicador_base,
         index=df_agrup.index,
     )
+
+    with sidebar_modelo:
+        with st.expander("Diagnóstico rendimiento estimado", expanded=False):
+            st.write(f"**Método:** {_modelo_status}")
+            st.write(f"**Puntos entrenamiento:** {_n_train:,}")
+            st.write(f"**Variables usadas:** {len(_features)}")
+            if _features:
+                st.code("\\n".join(_features), language="text")
+            if _n_train < int(_min_puntos_entrenamiento):
+                st.warning(
+                    "Hay pocos puntos de entrenamiento con los filtros actuales. "
+                    "Bajá el mínimo o revisá exclusiones/filtros."
+                )
 
 
 # Mascara inicial: rango de fechas
