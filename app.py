@@ -533,83 +533,112 @@ def obtener_cambios_producto_para_marcas(df_plot: pd.DataFrame) -> pd.DataFrame:
     return cambios[["Fecha_y_hora", "Producto"]]
 
 
-def _resumir_etiquetas_cambios(cambios: pd.DataFrame) -> pd.DataFrame:
+def _obtener_campanas_producto(cambios: pd.DataFrame, fecha_fin_visible=None) -> pd.DataFrame:
     """
-    Reduce la cantidad de etiquetas para evitar solapamientos.
+    Convierte la línea de tiempo de cambios en campañas visibles.
 
-    - Mantiene TODAS las líneas verticales de cambio.
-    - Agrupa cambios demasiado cercanos en una sola etiqueta.
-    - Si en un grupo hay varios grados, muestra los dos primeros y resume el resto.
+    Cada campaña queda definida por:
+    - inicio: fecha del cambio
+    - fin: fecha del siguiente cambio (o fin visible)
+    - producto: grado vigente en ese tramo
+
+    Esto permite etiquetar una sola vez por campaña, centrando el nombre
+    entre dos cambios y evitando duplicados / solapamientos innecesarios.
     """
     if cambios is None or len(cambios) == 0:
-        return pd.DataFrame(columns=["Fecha_y_hora", "Etiqueta"])
+        return pd.DataFrame(columns=["Inicio", "Fin", "Centro", "Producto", "Duracion_dias"])
 
     cambios = cambios.copy().sort_values("Fecha_y_hora").reset_index(drop=True)
-    fecha_min = pd.to_datetime(cambios["Fecha_y_hora"].min(), errors="coerce")
-    fecha_max = pd.to_datetime(cambios["Fecha_y_hora"].max(), errors="coerce")
+    cambios["Fecha_y_hora"] = pd.to_datetime(cambios["Fecha_y_hora"], errors="coerce")
+    cambios = cambios.dropna(subset=["Fecha_y_hora", "Producto"])
+    if len(cambios) == 0:
+        return pd.DataFrame(columns=["Inicio", "Fin", "Centro", "Producto", "Duracion_dias"])
 
-    if pd.isna(fecha_min) or pd.isna(fecha_max):
-        return pd.DataFrame(columns=["Fecha_y_hora", "Etiqueta"])
+    if fecha_fin_visible is None:
+        fecha_fin_visible = cambios["Fecha_y_hora"].max()
+    fecha_fin_visible = pd.to_datetime(fecha_fin_visible, errors="coerce")
+    if pd.isna(fecha_fin_visible):
+        fecha_fin_visible = cambios["Fecha_y_hora"].max()
 
+    registros = []
+    for idx, fila in cambios.iterrows():
+        inicio = pd.to_datetime(fila["Fecha_y_hora"], errors="coerce")
+        if pd.isna(inicio):
+            continue
+        if idx < len(cambios) - 1:
+            fin = pd.to_datetime(cambios.iloc[idx + 1]["Fecha_y_hora"], errors="coerce")
+        else:
+            fin = fecha_fin_visible
+
+        if pd.isna(fin):
+            fin = inicio
+        if fin < inicio:
+            fin = inicio
+
+        centro = inicio + (fin - inicio) / 2
+        duracion = max((fin - inicio).total_seconds() / 86400.0, 0.0)
+        registros.append({
+            "Inicio": inicio,
+            "Fin": fin,
+            "Centro": centro,
+            "Producto": str(fila.get("Producto", "")).strip(),
+            "Duracion_dias": duracion,
+        })
+
+    campanas = pd.DataFrame(registros)
+    if len(campanas) == 0:
+        return pd.DataFrame(columns=["Inicio", "Fin", "Centro", "Producto", "Duracion_dias"])
+
+    # Evitar duplicados visuales: si campañas consecutivas tienen el mismo producto,
+    # se fusionan en un único bloque.
+    fusionadas = []
+    actual = campanas.iloc[0].to_dict()
+    for _, fila in campanas.iloc[1:].iterrows():
+        if str(fila["Producto"]).strip() == str(actual["Producto"]).strip():
+            actual["Fin"] = fila["Fin"]
+            actual["Centro"] = actual["Inicio"] + (actual["Fin"] - actual["Inicio"]) / 2
+            actual["Duracion_dias"] = max((actual["Fin"] - actual["Inicio"]).total_seconds() / 86400.0, 0.0)
+        else:
+            fusionadas.append(actual)
+            actual = fila.to_dict()
+    fusionadas.append(actual)
+
+    return pd.DataFrame(fusionadas)
+
+
+def _obtener_etiquetas_campanas(cambios: pd.DataFrame, fecha_fin_visible=None) -> pd.DataFrame:
+    """
+    Genera etiquetas limpias, una por campaña visible.
+
+    Criterios:
+    - conserva TODAS las líneas verticales de cambio;
+    - muestra el nombre una sola vez por campaña;
+    - omite etiquetas de campañas demasiado cortas para no ensuciar la figura.
+    """
+    campanas = _obtener_campanas_producto(cambios, fecha_fin_visible=fecha_fin_visible)
+    if len(campanas) == 0:
+        return pd.DataFrame(columns=["Centro", "Etiqueta"])
+
+    fecha_min = pd.to_datetime(campanas["Inicio"].min(), errors="coerce")
+    fecha_max = pd.to_datetime(campanas["Fin"].max(), errors="coerce")
     rango_dias = max((fecha_max - fecha_min).total_seconds() / 86400.0, 1.0)
 
+    # Umbral visual: en ventanas chicas se puede mostrar más; en ventanas grandes, menos.
     if rango_dias <= 10:
-        max_etiquetas = 8
+        min_duracion = 0.10
     elif rango_dias <= 31:
-        max_etiquetas = 10
+        min_duracion = 0.35
     elif rango_dias <= 90:
-        max_etiquetas = 12
+        min_duracion = 1.00
     else:
-        max_etiquetas = 14
+        min_duracion = 3.00
 
-    min_sep_dias = max(rango_dias / max_etiquetas, 0.8)
-
-    grupos = []
-    grupo_actual = [cambios.iloc[0].to_dict()]
-    fecha_base = pd.to_datetime(cambios.iloc[0]["Fecha_y_hora"], errors="coerce")
-
-    for _, fila in cambios.iloc[1:].iterrows():
-        fecha_fila = pd.to_datetime(fila["Fecha_y_hora"], errors="coerce")
-        if pd.isna(fecha_fila):
-            continue
-
-        delta_dias = (fecha_fila - fecha_base).total_seconds() / 86400.0
-        if delta_dias < min_sep_dias:
-            grupo_actual.append(fila.to_dict())
-        else:
-            grupos.append(grupo_actual)
-            grupo_actual = [fila.to_dict()]
-            fecha_base = fecha_fila
-
-    if grupo_actual:
-        grupos.append(grupo_actual)
-
-    etiquetas = []
-    for grupo in grupos:
-        productos = []
-        for item in grupo:
-            prod = str(item.get("Producto", "")).strip()
-            if prod and prod not in productos:
-                productos.append(prod)
-
-        if not productos:
-            continue
-
-        if len(productos) == 1:
-            etiqueta = productos[0]
-        elif len(productos) == 2:
-            etiqueta = f"{productos[0]} / {productos[1]}"
-        else:
-            etiqueta = f"{productos[0]} / {productos[1]} +{len(productos) - 2}"
-
-        etiquetas.append(
-            {
-                "Fecha_y_hora": pd.to_datetime(grupo[0]["Fecha_y_hora"], errors="coerce"),
-                "Etiqueta": etiqueta,
-            }
-        )
-
-    return pd.DataFrame(etiquetas)
+    etiquetas = campanas.loc[
+        campanas["Duracion_dias"].fillna(0) >= min_duracion,
+        ["Centro", "Producto"]
+    ].copy()
+    etiquetas = etiquetas.rename(columns={"Producto": "Etiqueta"})
+    return etiquetas
 
 
 def agregar_marcas_producto_a_figura(
@@ -621,28 +650,33 @@ def agregar_marcas_producto_a_figura(
     """
     Agrega líneas verticales en cambios de producto/campaña.
 
-    Mejora visual:
-    - se dibujan todas las líneas de cambio;
-    - las etiquetas se compactan para que no se pisen ni se dupliquen visualmente.
+    Estilo buscado por el usuario:
+    - líneas verticales finas en cada cambio;
+    - nombre del grado UNA sola vez por campaña;
+    - etiquetas arriba de la figura, centradas en cada tramo;
+    - sin duplicados ni texto repetido en cada subplot.
     """
     cambios = obtener_cambios_producto_para_marcas(df_plot)
-
     if len(cambios) == 0:
         return fig
 
+    fecha_fin_visible = None
+    if isinstance(df_plot, pd.DataFrame) and "Fecha_y_hora" in df_plot.columns and len(df_plot) > 0:
+        fecha_fin_visible = pd.to_datetime(df_plot["Fecha_y_hora"], errors="coerce").max()
+
     usar_texto = bool(mostrar_etiquetas)
-    etiquetas = _resumir_etiquetas_cambios(cambios) if usar_texto else pd.DataFrame()
+    etiquetas = _obtener_etiquetas_campanas(cambios, fecha_fin_visible=fecha_fin_visible) if usar_texto else pd.DataFrame()
 
     try:
         margen_actual = 0
         if getattr(fig.layout, "margin", None) is not None:
             margen_actual = getattr(fig.layout.margin, "t", 0) or 0
         if usar_texto:
-            fig.update_layout(margin=dict(t=max(margen_actual, 120)))
+            fig.update_layout(margin=dict(t=max(margen_actual, 95)))
     except Exception:
         pass
 
-    # Dibujar todas las líneas de cambio
+    # Dibujar todas las líneas de cambio.
     for _, fila in cambios.iterrows():
         try:
             x_val = fila["Fecha_y_hora"]
@@ -654,33 +688,30 @@ def agregar_marcas_producto_a_figura(
                 y1=1,
                 xref="x",
                 yref="paper",
-                line=dict(
-                    width=1,
-                    dash="dot",
-                    color="rgba(90,90,90,0.40)",
-                ),
+                line=dict(width=1, dash="dot", color="rgba(90,90,90,0.35)"),
                 opacity=0.55,
                 layer="below",
             )
         except Exception:
             pass
 
-    # Dibujar etiquetas compactadas
+    # Dibujar una sola etiqueta por campaña, centrada arriba.
     if usar_texto and len(etiquetas) > 0:
         for _, fila in etiquetas.iterrows():
             try:
                 fig.add_annotation(
-                    x=fila["Fecha_y_hora"],
-                    y=1.015,
+                    x=fila["Centro"],
+                    y=1.01,
                     xref="x",
                     yref="paper",
                     text=str(fila["Etiqueta"]),
                     showarrow=False,
                     textangle=-90,
-                    font=dict(size=8, color="rgba(70,70,70,0.95)"),
+                    font=dict(size=8, color="rgba(80,80,80,0.95)"),
                     align="center",
                     xanchor="center",
                     yanchor="bottom",
+                    bgcolor="rgba(255,255,255,0.65)",
                 )
             except Exception:
                 pass
