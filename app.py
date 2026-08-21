@@ -650,11 +650,10 @@ def agregar_marcas_producto_a_figura(
     """
     Agrega líneas verticales en cambios de producto/campaña.
 
-    Estilo buscado por el usuario:
-    - líneas verticales finas en cada cambio;
-    - nombre del grado UNA sola vez por campaña;
-    - etiquetas arriba de la figura, centradas en cada tramo;
-    - sin duplicados ni texto repetido en cada subplot.
+    Ajuste pedido por el usuario:
+    - en gráficos separados, las líneas NO deben atravesar toda la figura;
+    - deben cortarse por subplot para no pasar por encima de títulos;
+    - el nombre del grado debe verse un poco más grande.
     """
     cambios = obtener_cambios_producto_para_marcas(df_plot)
     if len(cambios) == 0:
@@ -672,26 +671,59 @@ def agregar_marcas_producto_a_figura(
         if getattr(fig.layout, "margin", None) is not None:
             margen_actual = getattr(fig.layout.margin, "t", 0) or 0
         if usar_texto:
-            fig.update_layout(margin=dict(t=max(margen_actual, 95)))
+            fig.update_layout(margin=dict(t=max(margen_actual, 110)))
     except Exception:
         pass
+
+    def _contar_filas_subplots(_fig):
+        try:
+            grid_ref = getattr(_fig, "_grid_ref", None)
+            if grid_ref:
+                return len(grid_ref)
+        except Exception:
+            pass
+        try:
+            yaxes = []
+            for k in _fig.layout:
+                if str(k).startswith("yaxis"):
+                    ax = getattr(_fig.layout, str(k), None)
+                    if ax is not None and getattr(ax, "domain", None) is not None:
+                        yaxes.append(k)
+            return max(1, len(yaxes))
+        except Exception:
+            return 1
+
+    n_filas = _contar_filas_subplots(fig) if en_subplots else 1
 
     # Dibujar todas las líneas de cambio.
     for _, fila in cambios.iterrows():
         try:
             x_val = fila["Fecha_y_hora"]
-            fig.add_shape(
-                type="line",
-                x0=x_val,
-                x1=x_val,
-                y0=0,
-                y1=1,
-                xref="x",
-                yref="paper",
-                line=dict(width=1, dash="dot", color="rgba(90,90,90,0.35)"),
-                opacity=0.55,
-                layer="below",
-            )
+            if en_subplots and n_filas > 1:
+                for row in range(1, n_filas + 1):
+                    fig.add_vline(
+                        x=x_val,
+                        line_width=1,
+                        line_dash="dot",
+                        line_color="rgba(90,90,90,0.35)",
+                        opacity=0.55,
+                        layer="below",
+                        row=row,
+                        col=1,
+                    )
+            else:
+                fig.add_shape(
+                    type="line",
+                    x0=x_val,
+                    x1=x_val,
+                    y0=0,
+                    y1=1,
+                    xref="x",
+                    yref="paper",
+                    line=dict(width=1, dash="dot", color="rgba(90,90,90,0.35)"),
+                    opacity=0.55,
+                    layer="below",
+                )
         except Exception:
             pass
 
@@ -701,17 +733,17 @@ def agregar_marcas_producto_a_figura(
             try:
                 fig.add_annotation(
                     x=fila["Centro"],
-                    y=1.01,
+                    y=1.02,
                     xref="x",
                     yref="paper",
                     text=str(fila["Etiqueta"]),
                     showarrow=False,
                     textangle=-90,
-                    font=dict(size=8, color="rgba(80,80,80,0.95)"),
+                    font=dict(size=10, color="rgba(80,80,80,0.98)"),
                     align="center",
                     xanchor="center",
                     yanchor="bottom",
-                    bgcolor="rgba(255,255,255,0.65)",
+                    bgcolor="rgba(255,255,255,0.70)",
                 )
             except Exception:
                 pass
