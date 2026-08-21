@@ -533,6 +533,85 @@ def obtener_cambios_producto_para_marcas(df_plot: pd.DataFrame) -> pd.DataFrame:
     return cambios[["Fecha_y_hora", "Producto"]]
 
 
+def _resumir_etiquetas_cambios(cambios: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reduce la cantidad de etiquetas para evitar solapamientos.
+
+    - Mantiene TODAS las líneas verticales de cambio.
+    - Agrupa cambios demasiado cercanos en una sola etiqueta.
+    - Si en un grupo hay varios grados, muestra los dos primeros y resume el resto.
+    """
+    if cambios is None or len(cambios) == 0:
+        return pd.DataFrame(columns=["Fecha_y_hora", "Etiqueta"])
+
+    cambios = cambios.copy().sort_values("Fecha_y_hora").reset_index(drop=True)
+    fecha_min = pd.to_datetime(cambios["Fecha_y_hora"].min(), errors="coerce")
+    fecha_max = pd.to_datetime(cambios["Fecha_y_hora"].max(), errors="coerce")
+
+    if pd.isna(fecha_min) or pd.isna(fecha_max):
+        return pd.DataFrame(columns=["Fecha_y_hora", "Etiqueta"])
+
+    rango_dias = max((fecha_max - fecha_min).total_seconds() / 86400.0, 1.0)
+
+    if rango_dias <= 10:
+        max_etiquetas = 8
+    elif rango_dias <= 31:
+        max_etiquetas = 10
+    elif rango_dias <= 90:
+        max_etiquetas = 12
+    else:
+        max_etiquetas = 14
+
+    min_sep_dias = max(rango_dias / max_etiquetas, 0.8)
+
+    grupos = []
+    grupo_actual = [cambios.iloc[0].to_dict()]
+    fecha_base = pd.to_datetime(cambios.iloc[0]["Fecha_y_hora"], errors="coerce")
+
+    for _, fila in cambios.iloc[1:].iterrows():
+        fecha_fila = pd.to_datetime(fila["Fecha_y_hora"], errors="coerce")
+        if pd.isna(fecha_fila):
+            continue
+
+        delta_dias = (fecha_fila - fecha_base).total_seconds() / 86400.0
+        if delta_dias < min_sep_dias:
+            grupo_actual.append(fila.to_dict())
+        else:
+            grupos.append(grupo_actual)
+            grupo_actual = [fila.to_dict()]
+            fecha_base = fecha_fila
+
+    if grupo_actual:
+        grupos.append(grupo_actual)
+
+    etiquetas = []
+    for grupo in grupos:
+        productos = []
+        for item in grupo:
+            prod = str(item.get("Producto", "")).strip()
+            if prod and prod not in productos:
+                productos.append(prod)
+
+        if not productos:
+            continue
+
+        if len(productos) == 1:
+            etiqueta = productos[0]
+        elif len(productos) == 2:
+            etiqueta = f"{productos[0]} / {productos[1]}"
+        else:
+            etiqueta = f"{productos[0]} / {productos[1]} +{len(productos) - 2}"
+
+        etiquetas.append(
+            {
+                "Fecha_y_hora": pd.to_datetime(grupo[0]["Fecha_y_hora"], errors="coerce"),
+                "Etiqueta": etiqueta,
+            }
+        )
+
+    return pd.DataFrame(etiquetas)
+
+
 def agregar_marcas_producto_a_figura(
     fig,
     df_plot,
@@ -540,12 +619,11 @@ def agregar_marcas_producto_a_figura(
     mostrar_etiquetas=True,
 ):
     """
-    Agrega líneas verticales en todos los cambios de producto/campaña.
+    Agrega líneas verticales en cambios de producto/campaña.
 
-    Estilo legible para muchos cambios de grado:
-    - línea vertical punteada;
-    - nombre del grado rotado en vertical arriba de la gráfica;
-    - sin recuadros.
+    Mejora visual:
+    - se dibujan todas las líneas de cambio;
+    - las etiquetas se compactan para que no se pisen ni se dupliquen visualmente.
     """
     cambios = obtener_cambios_producto_para_marcas(df_plot)
 
@@ -553,22 +631,21 @@ def agregar_marcas_producto_a_figura(
         return fig
 
     usar_texto = bool(mostrar_etiquetas)
+    etiquetas = _resumir_etiquetas_cambios(cambios) if usar_texto else pd.DataFrame()
 
-    # Margen superior moderado para que entren los nombres de grado.
     try:
         margen_actual = 0
         if getattr(fig.layout, "margin", None) is not None:
             margen_actual = getattr(fig.layout.margin, "t", 0) or 0
         if usar_texto:
-            fig.update_layout(margin=dict(t=max(margen_actual, 125)))
+            fig.update_layout(margin=dict(t=max(margen_actual, 120)))
     except Exception:
         pass
 
+    # Dibujar todas las líneas de cambio
     for _, fila in cambios.iterrows():
         try:
             x_val = fila["Fecha_y_hora"]
-            producto = str(fila["Producto"])
-
             fig.add_shape(
                 type="line",
                 x0=x_val,
@@ -580,33 +657,33 @@ def agregar_marcas_producto_a_figura(
                 line=dict(
                     width=1,
                     dash="dot",
-                    color="rgba(70,70,70,0.55)",
+                    color="rgba(90,90,90,0.40)",
                 ),
-                opacity=0.65,
+                opacity=0.55,
                 layer="below",
             )
+        except Exception:
+            pass
 
-            if usar_texto:
+    # Dibujar etiquetas compactadas
+    if usar_texto and len(etiquetas) > 0:
+        for _, fila in etiquetas.iterrows():
+            try:
                 fig.add_annotation(
-                    x=x_val,
-                    y=1.02,
+                    x=fila["Fecha_y_hora"],
+                    y=1.015,
                     xref="x",
                     yref="paper",
-                    text=producto,
+                    text=str(fila["Etiqueta"]),
                     showarrow=False,
                     textangle=-90,
-                    font=dict(
-                        size=8,
-                        color="rgba(70,70,70,0.95)",
-                    ),
+                    font=dict(size=8, color="rgba(70,70,70,0.95)"),
                     align="center",
                     xanchor="center",
                     yanchor="bottom",
                 )
-
-        except Exception:
-            # Las marcas son auxiliares y nunca deben romper la app.
-            pass
+            except Exception:
+                pass
 
     return fig
 
