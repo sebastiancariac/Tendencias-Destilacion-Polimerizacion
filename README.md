@@ -97,3 +97,15 @@ Ahora:
 - Se muestra el nombre del grado/producto sobre cada marca.
 - Las etiquetas se escalonan en varias alturas para reducir superposición.
 - Se aumenta el margen superior de la figura para mejorar la lectura.
+
+
+## Estilo clásico de cambios de grado
+
+Se dejó el estilo de marcas de grado similar al anterior:
+
+```text
+- líneas verticales punteadas;
+- nombre del grado horizontal arriba de la gráfica;
+- sin recuadros;
+- sin texto vertical.
+```
