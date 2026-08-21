@@ -542,59 +542,66 @@ def agregar_marcas_producto_a_figura(
     """
     Agrega líneas verticales en todos los cambios de producto/campaña.
 
-    Se usa add_shape en lugar de add_vline porque es más robusto con fechas,
-    subplots y ejes secundarios.
+    Mejoras visuales:
+    - líneas más suaves;
+    - etiquetas con nombre de grado/producto;
+    - etiquetas escalonadas para evitar superposición;
+    - margen superior extra para que se lean bien.
     """
     cambios = obtener_cambios_producto_para_marcas(df_plot)
 
     if len(cambios) == 0:
         return fig
 
-    usar_texto = mostrar_etiquetas and len(cambios) <= 18
+    usar_texto = bool(mostrar_etiquetas)
+    niveles_y = [1.015, 1.055, 1.095]
 
-    for _, fila in cambios.iterrows():
+    # Dar un poco más de aire arriba cuando se muestran nombres.
+    try:
+        margen_actual = 0
+        if getattr(fig.layout, 'margin', None) is not None:
+            margen_actual = getattr(fig.layout.margin, 't', 0) or 0
+        if usar_texto:
+            fig.update_layout(margin=dict(t=max(margen_actual, 110)))
+    except Exception:
+        pass
+
+    for idx, (_, fila) in enumerate(cambios.iterrows()):
         try:
-            x_val = fila["Fecha_y_hora"]
+            x_val = fila['Fecha_y_hora']
+            producto = str(fila['Producto'])
 
-            if en_subplots:
-                # En subplots, yref='paper' asegura que la línea cruce toda la figura.
-                fig.add_shape(
-                    type="line",
-                    x0=x_val,
-                    x1=x_val,
-                    y0=0,
-                    y1=1,
-                    xref="x",
-                    yref="paper",
-                    line=dict(width=1, dash="dot"),
-                    opacity=0.55,
-                )
-            else:
-                fig.add_shape(
-                    type="line",
-                    x0=x_val,
-                    x1=x_val,
-                    y0=0,
-                    y1=1,
-                    xref="x",
-                    yref="paper",
-                    line=dict(width=1, dash="dot"),
-                    opacity=0.55,
-                )
+            fig.add_shape(
+                type='line',
+                x0=x_val,
+                x1=x_val,
+                y0=0,
+                y1=1,
+                xref='x',
+                yref='paper',
+                line=dict(width=1, dash='dot', color='rgba(70,70,70,0.55)'),
+                opacity=0.75,
+                layer='below',
+            )
 
             if usar_texto:
+                y_label = niveles_y[idx % len(niveles_y)]
                 fig.add_annotation(
                     x=x_val,
-                    y=1.02,
-                    xref="x",
-                    yref="paper",
-                    text=str(fila["Producto"]),
+                    y=y_label,
+                    xref='x',
+                    yref='paper',
+                    text=producto,
                     showarrow=False,
-                    font=dict(size=9),
-                    textangle=0,
-                    yanchor="bottom",
+                    textangle=-90,
+                    font=dict(size=9, color='rgba(60,60,60,0.95)'),
+                    align='center',
+                    bgcolor='rgba(255,255,255,0.75)',
+                    bordercolor='rgba(160,160,160,0.35)',
+                    borderwidth=1,
+                    borderpad=2,
+                    yanchor='bottom',
                 )
-
         except Exception:
             # Las marcas son auxiliares y nunca deben romper la app.
             pass
@@ -2556,8 +2563,7 @@ with tab1:
                         )
                     else:
                         st.caption(
-                            f"Las líneas verticales punteadas muestran {_n_marcas} cambios "
-                            "de producto/campaña del período visible."
+                            f"Las líneas verticales punteadas muestran {_n_marcas} cambios de producto/campaña del período visible, con el nombre del grado sobre cada marca."
                         )
                 elif filtro_producto_activo:
                     st.caption(
@@ -2667,8 +2673,7 @@ with tab1:
                         )
                     else:
                         st.caption(
-                            f"Las líneas verticales punteadas muestran {_n_marcas} cambios "
-                            "de producto/campaña del período visible."
+                            f"Las líneas verticales punteadas muestran {_n_marcas} cambios de producto/campaña del período visible, con el nombre del grado sobre cada marca."
                         )
                 elif filtro_producto_activo:
                     st.caption(

@@ -90,3 +90,10 @@ Ahora:
 3. Si el filtro por producto está activo, igual se muestran las marcas/campañas.
 4. Se usa add_shape en lugar de add_vline para que las líneas sean más robustas con fechas, subplots y eje secundario.
 ```
+
+
+## Mejora visual de cambios de grado
+- Las líneas verticales ahora son más suaves.
+- Se muestra el nombre del grado/producto sobre cada marca.
+- Las etiquetas se escalonan en varias alturas para reducir superposición.
+- Se aumenta el margen superior de la figura para mejorar la lectura.
