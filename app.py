@@ -1184,12 +1184,86 @@ with sidebar_principal:
     fecha_min = df["Fecha_y_hora"].min().date()
     fecha_max = df["Fecha_y_hora"].max().date()
 
-    desde = st.date_input("Desde", value=fecha_min, min_value=fecha_min, max_value=fecha_max)
-    hasta = st.date_input("Hasta", value=fecha_max, min_value=fecha_min, max_value=fecha_max)
+    # Selector de fechas robusto.
+    # Evitamos st.date_input con min/max porque en algunas versiones de Streamlit
+    # el desplegable de año no muestra cómodamente años futuros aunque la fecha sea válida.
+    # El usuario puede escribir directamente YYYY/MM/DD.
+    st.caption(
+        f"Rango disponible en Excel: {fecha_min.strftime('%Y/%m/%d')} a {fecha_max.strftime('%Y/%m/%d')}"
+    )
+
+    key_desde_text = f"fecha_desde_text_{unidad}"
+    key_hasta_text = f"fecha_hasta_text_{unidad}"
+
+    if key_desde_text not in st.session_state:
+        st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
+
+    if key_hasta_text not in st.session_state:
+        st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
+
+    def _parse_fecha_sidebar(valor, fallback):
+        if valor is None or str(valor).strip() == "":
+            return fallback
+
+        texto = str(valor).strip()
+
+        for formato in ["%Y/%m/%d", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"]:
+            try:
+                return pd.to_datetime(texto, format=formato).date()
+            except Exception:
+                pass
+
+        fecha = pd.to_datetime(texto, errors="coerce", dayfirst=False)
+        if pd.isna(fecha):
+            fecha = pd.to_datetime(texto, errors="coerce", dayfirst=True)
+
+        if pd.isna(fecha):
+            return None
+
+        return fecha.date()
+
+    desde_txt = st.text_input(
+        "Desde",
+        key=key_desde_text,
+        help="Escribir como YYYY/MM/DD. Ejemplo: 2026/07/01",
+    )
+
+    hasta_txt = st.text_input(
+        "Hasta",
+        key=key_hasta_text,
+        help="Escribir como YYYY/MM/DD. Ejemplo: 2026/08/18",
+    )
+
+    desde = _parse_fecha_sidebar(desde_txt, fecha_min)
+    hasta = _parse_fecha_sidebar(hasta_txt, fecha_max)
+
+    if desde is None or hasta is None:
+        st.error("Formato de fecha inválido. Usá YYYY/MM/DD, por ejemplo 2026/08/18.")
+        st.stop()
 
     if desde > hasta:
         st.error("La fecha 'Desde' no puede ser posterior a 'Hasta'.")
         st.stop()
+
+    if desde < fecha_min or hasta > fecha_max:
+        st.warning(
+            "El rango seleccionado queda parcialmente fuera del Excel. "
+            "Se mostrarán solo los datos disponibles."
+        )
+
+    c_fecha_1, c_fecha_2 = st.columns(2)
+    with c_fecha_1:
+        if st.button("Usar todo", key=f"btn_fechas_todo_{unidad}", width="stretch"):
+            st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
+            st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
+            st.rerun()
+
+    with c_fecha_2:
+        if st.button("Últimos 60 días", key=f"btn_fechas_60d_{unidad}", width="stretch"):
+            _desde_60 = max(fecha_min, (pd.Timestamp(fecha_max) - pd.Timedelta(days=60)).date())
+            st.session_state[key_desde_text] = _desde_60.strftime("%Y/%m/%d")
+            st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
+            st.rerun()
 
     st.markdown("---")
     st.subheader("Variables a graficar")
