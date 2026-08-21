@@ -1185,9 +1185,8 @@ with sidebar_principal:
     fecha_max = df["Fecha_y_hora"].max().date()
 
     # Selector de fechas robusto.
-    # Evitamos st.date_input con min/max porque en algunas versiones de Streamlit
-    # el desplegable de año no muestra cómodamente años futuros aunque la fecha sea válida.
-    # El usuario puede escribir directamente YYYY/MM/DD.
+    # Se usan campos de texto para evitar problemas del calendario de Streamlit,
+    # y presets antes de crear los text_input para que los botones funcionen bien.
     st.caption(
         f"Rango disponible en Excel: {fecha_min.strftime('%Y/%m/%d')} a {fecha_max.strftime('%Y/%m/%d')}"
     )
@@ -1222,6 +1221,87 @@ with sidebar_principal:
 
         return fecha.date()
 
+    def _nombre_mes_es(fecha_ts):
+        meses = {
+            1: "Enero",
+            2: "Febrero",
+            3: "Marzo",
+            4: "Abril",
+            5: "Mayo",
+            6: "Junio",
+            7: "Julio",
+            8: "Agosto",
+            9: "Septiembre",
+            10: "Octubre",
+            11: "Noviembre",
+            12: "Diciembre",
+        }
+        return f"{meses[int(fecha_ts.month)]} {int(fecha_ts.year)}"
+
+    def _fin_de_mes(fecha_ts):
+        fecha_ts = pd.Timestamp(fecha_ts)
+        return (fecha_ts + pd.offsets.MonthEnd(0)).date()
+
+    # Presets de período. Importante: van ANTES de los text_input.
+    # Si se actualiza st.session_state después de crear el text_input,
+    # Streamlit puede no reflejar el cambio correctamente.
+    st.markdown("**Selección rápida de período**")
+
+    _meses_disponibles = (
+        pd.to_datetime(df["Fecha_y_hora"], errors="coerce")
+        .dropna()
+        .dt.to_period("M")
+        .drop_duplicates()
+        .sort_values()
+    )
+
+    if len(_meses_disponibles) > 0:
+        _meses_ts = [p.to_timestamp() for p in _meses_disponibles]
+        _labels_meses = [_nombre_mes_es(m) for m in _meses_ts]
+
+        # Seleccionar por defecto el mes del campo Hasta si existe; si no, el último mes disponible.
+        _hasta_actual = _parse_fecha_sidebar(st.session_state.get(key_hasta_text), fecha_max)
+        _periodo_hasta_actual = pd.Period(pd.Timestamp(_hasta_actual), freq="M") if _hasta_actual else pd.Period(pd.Timestamp(fecha_max), freq="M")
+        _periodos_lista = list(_meses_disponibles)
+
+        if _periodo_hasta_actual in _periodos_lista:
+            _idx_mes_default = _periodos_lista.index(_periodo_hasta_actual)
+        else:
+            _idx_mes_default = len(_meses_ts) - 1
+
+        _mes_seleccionado_label = st.selectbox(
+            "Mes para informe",
+            options=_labels_meses,
+            index=_idx_mes_default,
+            key=f"mes_informe_{unidad}",
+            help="Aplica el mes completo. Ejemplo: Julio 2026 = 2026/07/01 a 2026/07/31.",
+        )
+
+        _idx_mes_sel = _labels_meses.index(_mes_seleccionado_label)
+        _mes_sel_ts = pd.Timestamp(_meses_ts[_idx_mes_sel])
+        _inicio_mes_sel = _mes_sel_ts.date()
+        _fin_mes_sel = _fin_de_mes(_mes_sel_ts)
+
+        c_preset_1, c_preset_2 = st.columns(2)
+        with c_preset_1:
+            if st.button("Aplicar mes", key=f"btn_aplicar_mes_{unidad}", width="stretch"):
+                st.session_state[key_desde_text] = _inicio_mes_sel.strftime("%Y/%m/%d")
+                st.session_state[key_hasta_text] = _fin_mes_sel.strftime("%Y/%m/%d")
+                st.rerun()
+
+        with c_preset_2:
+            if st.button("Usar todo", key=f"btn_fechas_todo_{unidad}", width="stretch"):
+                st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
+                st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
+                st.rerun()
+    else:
+        if st.button("Usar todo", key=f"btn_fechas_todo_{unidad}", width="stretch"):
+            st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
+            st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
+            st.rerun()
+
+    st.markdown("**Rango seleccionado**")
+
     desde_txt = st.text_input(
         "Desde",
         key=key_desde_text,
@@ -1231,7 +1311,7 @@ with sidebar_principal:
     hasta_txt = st.text_input(
         "Hasta",
         key=key_hasta_text,
-        help="Escribir como YYYY/MM/DD. Ejemplo: 2026/08/18",
+        help="Escribir como YYYY/MM/DD. Ejemplo: 2026/07/31",
     )
 
     desde = _parse_fecha_sidebar(desde_txt, fecha_min)
@@ -1250,20 +1330,6 @@ with sidebar_principal:
             "El rango seleccionado queda parcialmente fuera del Excel. "
             "Se mostrarán solo los datos disponibles."
         )
-
-    c_fecha_1, c_fecha_2 = st.columns(2)
-    with c_fecha_1:
-        if st.button("Usar todo", key=f"btn_fechas_todo_{unidad}", width="stretch"):
-            st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
-            st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
-            st.rerun()
-
-    with c_fecha_2:
-        if st.button("Últimos 60 días", key=f"btn_fechas_60d_{unidad}", width="stretch"):
-            _desde_60 = max(fecha_min, (pd.Timestamp(fecha_max) - pd.Timedelta(days=60)).date())
-            st.session_state[key_desde_text] = _desde_60.strftime("%Y/%m/%d")
-            st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
-            st.rerun()
 
     st.markdown("---")
     st.subheader("Variables a graficar")
