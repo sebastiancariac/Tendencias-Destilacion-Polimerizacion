@@ -496,6 +496,43 @@ def preparar_serie_producto_filtrado_para_grafico(df_plot, y_col, agrupacion):
     return df_linea["Fecha_y_hora"], y
 
 
+def obtener_cambios_producto_para_marcas(df_plot: pd.DataFrame) -> pd.DataFrame:
+    """
+    Devuelve los cambios de producto/campaña para marcar en la gráfica.
+
+    Importante:
+    - Usa la secuencia temporal de Producto.
+    - El primer punto visible se marca como inicio de campaña visible.
+    - Si hay valores vacíos de Producto, se ignoran.
+    """
+    if "Producto" not in df_plot.columns or "Fecha_y_hora" not in df_plot.columns:
+        return pd.DataFrame(columns=["Fecha_y_hora", "Producto"])
+
+    datos_producto = df_plot[["Fecha_y_hora", "Producto"]].copy()
+    datos_producto["Fecha_y_hora"] = pd.to_datetime(
+        datos_producto["Fecha_y_hora"],
+        errors="coerce",
+    )
+    datos_producto["Producto"] = datos_producto["Producto"].map(
+        normalizar_producto_operativo
+    )
+
+    datos_producto = datos_producto.dropna(subset=["Fecha_y_hora", "Producto"])
+
+    if len(datos_producto) == 0:
+        return pd.DataFrame(columns=["Fecha_y_hora", "Producto"])
+
+    datos_producto = datos_producto.sort_values("Fecha_y_hora").reset_index(drop=True)
+
+    cambios = datos_producto.loc[
+        datos_producto["Producto"].astype(str).ne(
+            datos_producto["Producto"].astype(str).shift()
+        )
+    ].copy()
+
+    return cambios[["Fecha_y_hora", "Producto"]]
+
+
 def agregar_marcas_producto_a_figura(
     fig,
     df_plot,
@@ -505,99 +542,61 @@ def agregar_marcas_producto_a_figura(
     """
     Agrega líneas verticales en todos los cambios de producto/campaña.
 
-    - No limita la cantidad de marcas ni recorta al comienzo del período.
-    - Si hay demasiados cambios, mantiene todas las líneas pero omite los textos
-      para no saturar la gráfica.
+    Se usa add_shape en lugar de add_vline porque es más robusto con fechas,
+    subplots y ejes secundarios.
     """
-    if "Producto" not in df_plot.columns or "Fecha_y_hora" not in df_plot.columns:
-        return fig
-
-    datos_producto = df_plot[["Fecha_y_hora", "Producto"]].copy()
-    datos_producto["Producto"] = datos_producto["Producto"].map(normalizar_producto_operativo)
-    datos_producto = datos_producto.dropna(subset=["Fecha_y_hora", "Producto"])
-
-    if len(datos_producto) == 0:
-        return fig
-
-    datos_producto = datos_producto.sort_values("Fecha_y_hora")
-    cambios = datos_producto.loc[
-        datos_producto["Producto"].astype(str).ne(
-            datos_producto["Producto"].astype(str).shift()
-        )
-    ].copy()
+    cambios = obtener_cambios_producto_para_marcas(df_plot)
 
     if len(cambios) == 0:
         return fig
 
-    # Cuando hay muchas transiciones, dibujar todas las líneas pero evitar
-    # superponer decenas de rótulos en la parte superior.
     usar_texto = mostrar_etiquetas and len(cambios) <= 18
 
     for _, fila in cambios.iterrows():
         try:
-            kwargs = dict(
-                x=fila["Fecha_y_hora"],
-                line_width=1,
-                line_dash="dot",
-                opacity=0.45,
-            )
-
-            if usar_texto:
-                kwargs.update(
-                    annotation_text=str(fila["Producto"]),
-                    annotation_position="top",
-                    annotation_font_size=9,
-                )
+            x_val = fila["Fecha_y_hora"]
 
             if en_subplots:
-                fig.add_vline(row="all", col=1, **kwargs)
+                # En subplots, yref='paper' asegura que la línea cruce toda la figura.
+                fig.add_shape(
+                    type="line",
+                    x0=x_val,
+                    x1=x_val,
+                    y0=0,
+                    y1=1,
+                    xref="x",
+                    yref="paper",
+                    line=dict(width=1, dash="dot"),
+                    opacity=0.55,
+                )
             else:
-                fig.add_vline(**kwargs)
+                fig.add_shape(
+                    type="line",
+                    x0=x_val,
+                    x1=x_val,
+                    y0=0,
+                    y1=1,
+                    xref="x",
+                    yref="paper",
+                    line=dict(width=1, dash="dot"),
+                    opacity=0.55,
+                )
+
+            if usar_texto:
+                fig.add_annotation(
+                    x=x_val,
+                    y=1.02,
+                    xref="x",
+                    yref="paper",
+                    text=str(fila["Producto"]),
+                    showarrow=False,
+                    font=dict(size=9),
+                    textangle=0,
+                    yanchor="bottom",
+                )
 
         except Exception:
             # Las marcas son auxiliares y nunca deben romper la app.
-            pass
-
-    return fig
-
-    datos_producto = df_plot[["Fecha_y_hora", "Producto"]].copy()
-    datos_producto["Producto"] = datos_producto["Producto"].map(normalizar_producto_operativo)
-    datos_producto = datos_producto.dropna(subset=["Fecha_y_hora", "Producto"])
-
-    if len(datos_producto) == 0:
-        return fig
-
-    datos_producto = datos_producto.sort_values("Fecha_y_hora")
-    cambios = datos_producto.loc[
-        datos_producto["Producto"].astype(str).ne(datos_producto["Producto"].astype(str).shift())
-    ].copy()
-
-    if len(cambios) == 0:
-        return fig
-
-    if len(cambios) > max_marcas:
-        cambios = cambios.iloc[:max_marcas].copy()
-
-    for _, fila in cambios.iterrows():
-        try:
-            kwargs = dict(
-                x=fila["Fecha_y_hora"],
-                line_width=1,
-                line_dash="dot",
-                opacity=0.45,
-                annotation_text=str(fila["Producto"]),
-                annotation_position="top",
-                annotation_font_size=10,
-            )
-
-            if en_subplots:
-                fig.add_vline(row="all", col=1, **kwargs)
-            else:
-                fig.add_vline(**kwargs)
-
-        except Exception:
-            # Las marcas de producto son auxiliares; si Plotly no permite agregar
-            # alguna anotación específica, no debe romper la app.
             pass
 
     return fig
@@ -1519,6 +1518,7 @@ with sidebar_principal:
     # FILTRO POR PRODUCTO / CAMPAÑA
     # ==============================================================================
     productos_sel = []
+    df_producto_marcas = None
 
     if unidad.startswith("Polimer"):
         st.markdown("---")
@@ -1542,6 +1542,10 @@ with sidebar_principal:
             )
 
             df["Producto"] = serie_producto.map(normalizar_producto_operativo)
+
+            # Guardamos la línea de tiempo completa de productos ANTES de filtrar.
+            # Se usa solo para dibujar cambios de grado/campaña en las gráficas.
+            df_producto_marcas = df[["Fecha_y_hora", "Producto"]].copy()
 
             productos_disponibles = sorted([
                 str(p).strip()
@@ -2203,6 +2207,27 @@ for var in vars_filtro:
 
 df_f = df_agrup[mask].copy()
 
+# Línea de tiempo de productos para marcas de cambio de grado.
+# Se calcula sobre el dataset previo al filtro por producto para que,
+# aun filtrando un grado, se puedan ver los cambios/campañas del período.
+df_producto_marcas_visible = pd.DataFrame()
+
+if unidad.startswith("Polimer") and df_producto_marcas is not None:
+    try:
+        _tmp_marcas = df_producto_marcas.copy()
+        _tmp_marcas["Fecha_y_hora"] = pd.to_datetime(
+            _tmp_marcas["Fecha_y_hora"],
+            errors="coerce",
+        )
+        _desde_dt = pd.Timestamp(desde)
+        _hasta_dt = pd.Timestamp(hasta) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        df_producto_marcas_visible = _tmp_marcas[
+            (_tmp_marcas["Fecha_y_hora"] >= _desde_dt)
+            & (_tmp_marcas["Fecha_y_hora"] <= _hasta_dt)
+        ].copy()
+    except Exception:
+        df_producto_marcas_visible = pd.DataFrame()
+
 
 # ==============================================================================
 # CUERPO PRINCIPAL - ENCABEZADO
@@ -2510,21 +2535,34 @@ with tab1:
                     fig.update_yaxes(range=list(escala_y1_manual))
 
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
-                if filtro_producto_activo:
-                    st.caption(
-                        "Filtro por producto activo: se unen solo puntos consecutivos "
-                        "y se corta la línea cuando hay saltos entre campañas."
+                if mostrar_cambios_producto:
+                    _df_marcas = (
+                        df_producto_marcas_visible
+                        if isinstance(df_producto_marcas_visible, pd.DataFrame)
+                        and len(df_producto_marcas_visible) > 0
+                        else df_f
                     )
-                elif mostrar_cambios_producto:
                     fig = agregar_marcas_producto_a_figura(
                         fig,
-                        df_f,
+                        _df_marcas,
                         en_subplots=False,
                         mostrar_etiquetas=True,
                     )
+                    _n_marcas = len(obtener_cambios_producto_para_marcas(_df_marcas))
+                    if filtro_producto_activo:
+                        st.caption(
+                            f"Filtro por producto activo: se muestran {_n_marcas} marcas "
+                            "calculadas con la línea de tiempo completa de productos del período visible."
+                        )
+                    else:
+                        st.caption(
+                            f"Las líneas verticales punteadas muestran {_n_marcas} cambios "
+                            "de producto/campaña del período visible."
+                        )
+                elif filtro_producto_activo:
                     st.caption(
-                        "Las líneas verticales punteadas muestran todos los cambios "
-                        "de producto/campaña del período visible."
+                        "Filtro por producto activo: se unen solo puntos consecutivos "
+                        "y se corta la línea cuando hay saltos entre campañas."
                     )
 
             st.caption(
@@ -2608,21 +2646,34 @@ with tab1:
             fig.update_xaxes(showticklabels=True)
 
             if unidad.startswith("Polimer") and "Producto" in df_f.columns:
-                if filtro_producto_activo:
-                    st.caption(
-                        "Filtro por producto activo: se unen solo puntos consecutivos "
-                        "y se corta la línea cuando hay saltos entre campañas."
+                if mostrar_cambios_producto:
+                    _df_marcas = (
+                        df_producto_marcas_visible
+                        if isinstance(df_producto_marcas_visible, pd.DataFrame)
+                        and len(df_producto_marcas_visible) > 0
+                        else df_f
                     )
-                elif mostrar_cambios_producto:
                     fig = agregar_marcas_producto_a_figura(
                         fig,
-                        df_f,
+                        _df_marcas,
                         en_subplots=True,
                         mostrar_etiquetas=True,
                     )
+                    _n_marcas = len(obtener_cambios_producto_para_marcas(_df_marcas))
+                    if filtro_producto_activo:
+                        st.caption(
+                            f"Filtro por producto activo: se muestran {_n_marcas} marcas "
+                            "calculadas con la línea de tiempo completa de productos del período visible."
+                        )
+                    else:
+                        st.caption(
+                            f"Las líneas verticales punteadas muestran {_n_marcas} cambios "
+                            "de producto/campaña del período visible."
+                        )
+                elif filtro_producto_activo:
                     st.caption(
-                        "Las líneas verticales punteadas muestran todos los cambios "
-                        "de producto/campaña del período visible."
+                        "Filtro por producto activo: se unen solo puntos consecutivos "
+                        "y se corta la línea cuando hay saltos entre campañas."
                     )
 
             st.plotly_chart(fig, width="stretch")

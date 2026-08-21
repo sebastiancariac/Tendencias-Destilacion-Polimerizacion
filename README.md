@@ -74,3 +74,19 @@ Julio 2026 → Desde 2026/07/01 - Hasta 2026/07/31
 ```
 
 También se dejó el botón `Usar todo`.
+
+
+## Fix cambios de grado
+
+Se corrigió la opción `Mostrar cambios de grado`.
+
+Antes, si había filtro por producto activo, la app no dibujaba las líneas de cambio de grado porque la línea de tiempo ya estaba filtrada a un único producto.
+
+Ahora:
+
+```text
+1. Se guarda la línea de tiempo completa de Producto antes de filtrar.
+2. Las marcas se calculan con esa línea completa dentro del período visible.
+3. Si el filtro por producto está activo, igual se muestran las marcas/campañas.
+4. Se usa add_shape en lugar de add_vline para que las líneas sean más robustas con fechas, subplots y eje secundario.
+```
