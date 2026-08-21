@@ -109,3 +109,12 @@ Se dejó el estilo de marcas de grado similar al anterior:
 - sin recuadros;
 - sin texto vertical.
 ```
+
+
+## Cambios de grado en vertical
+
+Se ajustó la visualización para que las marcas de cambio de grado se lean mejor cuando hay muchas campañas:
+
+- líneas verticales punteadas;
+- nombre del grado rotado en vertical;
+- más margen superior para que entren las etiquetas.

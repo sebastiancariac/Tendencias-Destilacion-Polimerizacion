@@ -542,10 +542,10 @@ def agregar_marcas_producto_a_figura(
     """
     Agrega líneas verticales en todos los cambios de producto/campaña.
 
-    Estilo tipo versión anterior:
+    Estilo legible para muchos cambios de grado:
     - línea vertical punteada;
-    - nombre del grado horizontal arriba de la gráfica;
-    - sin recuadros ni etiquetas verticales.
+    - nombre del grado rotado en vertical arriba de la gráfica;
+    - sin recuadros.
     """
     cambios = obtener_cambios_producto_para_marcas(df_plot)
 
@@ -560,7 +560,7 @@ def agregar_marcas_producto_a_figura(
         if getattr(fig.layout, "margin", None) is not None:
             margen_actual = getattr(fig.layout.margin, "t", 0) or 0
         if usar_texto:
-            fig.update_layout(margin=dict(t=max(margen_actual, 85)))
+            fig.update_layout(margin=dict(t=max(margen_actual, 125)))
     except Exception:
         pass
 
@@ -589,14 +589,14 @@ def agregar_marcas_producto_a_figura(
             if usar_texto:
                 fig.add_annotation(
                     x=x_val,
-                    y=1.025,
+                    y=1.02,
                     xref="x",
                     yref="paper",
                     text=producto,
                     showarrow=False,
-                    textangle=0,
+                    textangle=-90,
                     font=dict(
-                        size=9,
+                        size=8,
                         color="rgba(70,70,70,0.95)",
                     ),
                     align="center",
