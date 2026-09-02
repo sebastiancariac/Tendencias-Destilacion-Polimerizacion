@@ -22,17 +22,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-try:
-    from sklearn.ensemble import GradientBoostingRegressor
-    from sklearn.impute import SimpleImputer
-    from sklearn.pipeline import make_pipeline
-    SKLEARN_DISPONIBLE = True
-except Exception:
-    GradientBoostingRegressor = None
-    SimpleImputer = None
-    make_pipeline = None
-    SKLEARN_DISPONIBLE = False
-
 
 # ==============================================================================
 # CONFIGURACION GENERAL
@@ -650,10 +639,11 @@ def agregar_marcas_producto_a_figura(
     """
     Agrega líneas verticales en cambios de producto/campaña.
 
-    Ajuste pedido por el usuario:
-    - en gráficos separados, las líneas NO deben atravesar toda la figura;
-    - deben cortarse por subplot para no pasar por encima de títulos;
-    - el nombre del grado debe verse un poco más grande.
+    Estilo buscado por el usuario:
+    - líneas verticales finas en cada cambio;
+    - nombre del grado UNA sola vez por campaña;
+    - etiquetas arriba de la figura, centradas en cada tramo;
+    - sin duplicados ni texto repetido en cada subplot.
     """
     cambios = obtener_cambios_producto_para_marcas(df_plot)
     if len(cambios) == 0:
@@ -671,59 +661,26 @@ def agregar_marcas_producto_a_figura(
         if getattr(fig.layout, "margin", None) is not None:
             margen_actual = getattr(fig.layout.margin, "t", 0) or 0
         if usar_texto:
-            fig.update_layout(margin=dict(t=max(margen_actual, 110)))
+            fig.update_layout(margin=dict(t=max(margen_actual, 95)))
     except Exception:
         pass
-
-    def _contar_filas_subplots(_fig):
-        try:
-            grid_ref = getattr(_fig, "_grid_ref", None)
-            if grid_ref:
-                return len(grid_ref)
-        except Exception:
-            pass
-        try:
-            yaxes = []
-            for k in _fig.layout:
-                if str(k).startswith("yaxis"):
-                    ax = getattr(_fig.layout, str(k), None)
-                    if ax is not None and getattr(ax, "domain", None) is not None:
-                        yaxes.append(k)
-            return max(1, len(yaxes))
-        except Exception:
-            return 1
-
-    n_filas = _contar_filas_subplots(fig) if en_subplots else 1
 
     # Dibujar todas las líneas de cambio.
     for _, fila in cambios.iterrows():
         try:
             x_val = fila["Fecha_y_hora"]
-            if en_subplots and n_filas > 1:
-                for row in range(1, n_filas + 1):
-                    fig.add_vline(
-                        x=x_val,
-                        line_width=1,
-                        line_dash="dot",
-                        line_color="rgba(90,90,90,0.35)",
-                        opacity=0.55,
-                        layer="below",
-                        row=row,
-                        col=1,
-                    )
-            else:
-                fig.add_shape(
-                    type="line",
-                    x0=x_val,
-                    x1=x_val,
-                    y0=0,
-                    y1=1,
-                    xref="x",
-                    yref="paper",
-                    line=dict(width=1, dash="dot", color="rgba(90,90,90,0.35)"),
-                    opacity=0.55,
-                    layer="below",
-                )
+            fig.add_shape(
+                type="line",
+                x0=x_val,
+                x1=x_val,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(width=1, dash="dot", color="rgba(90,90,90,0.35)"),
+                opacity=0.55,
+                layer="below",
+            )
         except Exception:
             pass
 
@@ -733,17 +690,17 @@ def agregar_marcas_producto_a_figura(
             try:
                 fig.add_annotation(
                     x=fila["Centro"],
-                    y=1.02,
+                    y=1.01,
                     xref="x",
                     yref="paper",
                     text=str(fila["Etiqueta"]),
                     showarrow=False,
                     textangle=-90,
-                    font=dict(size=10, color="rgba(80,80,80,0.98)"),
+                    font=dict(size=8, color="rgba(80,80,80,0.95)"),
                     align="center",
                     xanchor="center",
                     yanchor="bottom",
-                    bgcolor="rgba(255,255,255,0.70)",
+                    bgcolor="rgba(255,255,255,0.65)",
                 )
             except Exception:
                 pass
@@ -1215,8 +1172,11 @@ if unidad.startswith("Polimer") and all(
     df["Gap_vs_maximo_historico"] = np.nan
     df["Distancia_benchmark_productividad"] = np.nan
     df["Confiabilidad_benchmark_productividad"] = np.nan
+    df["N_vecinos_benchmark_productividad"] = np.nan
     df["Indicador_target_optimo_productividad"] = np.nan
     df["Percentil_rendimiento_base"] = np.nan
+    df["Indice_actividad_vs_estimado"] = np.nan
+    df["Alerta_baja_actividad"] = np.nan
     df["Familia_productividad_codigo"] = np.nan
     df["MFI_bin_productividad"] = np.nan
     df["H2_bin_productividad"] = np.nan
@@ -1228,8 +1188,10 @@ if unidad.startswith("Polimer") and all(
     # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
         "Productividad_estimada": "Rendimiento estimado",
-        "Desvio_vs_productividad_estimada": "Desvio vs rendimiento estimado [Real - Estimado]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad modelo dic-25/feb-26 [%]",
+        "Desvio_vs_productividad_estimada": "Desvío vs rendimiento estimado [Real - Estimado]",
+        "Indice_actividad_vs_estimado": "Índice actividad vs estimado [Real / Estimado]",
+        "Alerta_baja_actividad": "Alerta baja actividad [1 = revisar]",
+        "Confiabilidad_benchmark_productividad": "Disponibilidad correlación referencia [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1741,368 +1703,204 @@ filtro_producto_activo = unidad.startswith("Polimer") and len(productos_sel) > 0
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
 
-# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO POR VARIABLES CRITICAS
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO
+# ================================================================================
+# Criterio corregido:
+# - Se elimina el modelo estadístico/ML que veníamos probando porque no daba confianza.
+# - Se implementa la correlación de referencia del archivo:
+#   "Curvas de productividad (2025 - 2026).xlsx", hoja DATOS, columna V "Estimado".
+# - El estimado NO se entrena con el rendimiento real actual.
+# - El estimado depende de: grado polvo/familia, rango X-S, % propano, slurry y MFI polvo.
 #
-# Criterio conceptual:
-# - El rendimiento estimado NO depende del cambio de lecho.
-# - El rendimiento estimado NO se corrige contra el rendimiento real de la campaña actual.
-# - El estimado se calcula por variables críticas de proceso/catalizador.
-# - El desvío Real - Estimado se usa como señal de posible pérdida de actividad,
-#   contaminante o necesidad de revisar/cambiar lechos.
+# Fórmula de referencia del Excel:
+#   Si Grado Polvo = K y Rango X-S = 3-5:
+#       Est = 24.47 - 0.2198 * Propano
+#   Si Grado Polvo = K y Rango X-S = 2-4:
+#       Est = 21.943937610345401 - 0.20900191282896072 * Propano
+#             - 0.011743057462415179 * Slurry + 0.33497778099646869 * MFI
+#   Si Grado Polvo = L:
+#       Est = 26.838 - 0.3041 * Propano
+#   Si Grado Polvo = H:
+#       Est = 59.933053369846832 - 0.16619206190972843 * Propano
+#             - 0.60734925212800905 * Slurry - 1.0651802506881705 * MFI
 #
-# Cambio principal de esta versión:
-# - Se reemplaza el estimador por vecinos como método principal porque tendía a
-#   generar una curva demasiado plana.
-# - El método default es Gradient Boosting quantile, que captura respuestas no
-#   lineales de MFI, H2, propano, donor, slurry, temperatura, etc.
+# Nota importante:
+# En la planilla de referencia NO hay estimación para familias S, T, H KFM, H FFM
+# ni T ZN389. En esos casos la app deja el estimado en blanco para no inventar
+# una correlación no validada.
+
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
     for col in [
         "Fecha_y_hora",
         "Rendimiento",
-        "Presion_R2301",
         "Productividad_estimada",
     ]
 ):
     _fecha = pd.to_datetime(df_agrup["Fecha_y_hora"], errors="coerce")
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
-    _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
 
-    with sidebar_modelo:
-        st.markdown("---")
-        st.subheader("Modelo rendimiento estimado")
+    _coef_ref = {
+        ("K", "3-5"): {
+            "intercepto": 24.47,
+            "propano": -0.2198,
+            "slurry": 0.0,
+            "mfi": 0.0,
+        },
+        ("K", "2-4"): {
+            "intercepto": 21.943937610345401,
+            "propano": -0.20900191282896072,
+            "slurry": -0.011743057462415179,
+            "mfi": 0.33497778099646869,
+        },
+        ("L", "*"): {
+            "intercepto": 26.838,
+            "propano": -0.3041,
+            "slurry": 0.0,
+            "mfi": 0.0,
+        },
+        ("H", "*"): {
+            "intercepto": 59.933053369846832,
+            "propano": -0.16619206190972843,
+            "slurry": -0.60734925212800905,
+            "mfi": -1.0651802506881705,
+        },
+    }
 
-        with st.expander("Benchmark por variables críticas", expanded=True):
-            st.caption(
-                "El estimado se calcula con variables críticas de proceso/catalizador. "
-                "No usa cambio de lecho como variable y no se ajusta contra el real de la campaña actual."
-            )
+    # Mapeo de referencia tomado de Hoja4 del Excel de curvas.
+    # Se usa el grado normalizado de la app, sin sufijos TE.
+    _map_producto_ref = {
+        "KFM6110": {"grado_polvo": "H KFM", "rango_xs": "4,5-6", "target": 17.241379310344826, "usa_mfi_pellets": False},
+        "HYS6200": {"grado_polvo": "H", "rango_xs": "3-5", "target": 14.084507042253522, "usa_mfi_pellets": True},
+        "KYD6110": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": True},
+        "KED6270": {"grado_polvo": "K", "rango_xs": "2-4", "target": 14.705882352941176, "usa_mfi_pellets": True},
+        "LYD6200K": {"grado_polvo": "L", "rango_xs": "2-4", "target": 15.15151515151515, "usa_mfi_pellets": True},
+        "SMD6200": {"grado_polvo": "S", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
+        "RFD6140K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
+        "XSD6601K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
+        "WSD6601K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
+        "XSD6200T": {"grado_polvo": "T", "rango_xs": "3-5", "target": 18.518518518518519, "usa_mfi_pellets": False},
+        "XMD6279T": {"grado_polvo": "T", "rango_xs": "2,5-4,5", "target": 18.518518518518519, "usa_mfi_pellets": False},
+        "RFD6190K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
+        "RFM6270": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.15151515151515, "usa_mfi_pellets": False},
+    }
 
-            _metodo_estimacion = st.selectbox(
-                "Método de estimación",
-                options=[
-                    "Gradient Boosting quantile",
-                    "Gradient Boosting promedio",
-                ],
-                index=0,
-                key="metodo_estimacion_rendimiento",
-                help=(
-                    "Gradient Boosting captura relaciones no lineales. "
-                    "Quantile usa un percentil configurable como benchmark esperado."
-                ),
-            )
+    def _normalizar_rango_ref(valor):
+        if valor is None or pd.isna(valor):
+            return ""
+        txt = str(valor).strip().replace(" ", "")
+        txt = txt.replace(",", ".")
+        if txt in ["3.0-5.0", "3-5", "3.0-5"]:
+            return "3-5"
+        if txt in ["2.0-4.0", "2-4", "2.0-4"]:
+            return "2-4"
+        if txt in ["4.5-6.0", "4.5-6", "4,5-6"]:
+            return "4,5-6"
+        if txt in ["2.5-4.5", "2,5-4,5"]:
+            return "2,5-4,5"
+        return str(valor).strip()
 
-            _percentil_benchmark = st.number_input(
-                "Percentil benchmark",
-                min_value=0.40,
-                max_value=0.90,
-                value=0.65,
-                step=0.05,
-                format="%.2f",
-                key="percentil_benchmark_gbr",
-                help=(
-                    "Percentil usado por el modelo quantile. "
-                    "0.50 se aproxima a mediana; 0.65/0.70 es un benchmark algo exigente."
-                ),
-            )
+    def _coef_para_familia(grado_polvo, rango_xs):
+        grado_polvo = str(grado_polvo).strip().upper() if grado_polvo is not None and not pd.isna(grado_polvo) else ""
+        rango_xs = _normalizar_rango_ref(rango_xs)
+        if (grado_polvo, rango_xs) in _coef_ref:
+            return _coef_ref[(grado_polvo, rango_xs)]
+        if (grado_polvo, "*") in _coef_ref:
+            return _coef_ref[(grado_polvo, "*")]
+        return None
 
-            c_gbr_1, c_gbr_2 = st.columns(2)
-            with c_gbr_1:
-                _gbr_n_estimators = st.number_input(
-                    "Árboles",
-                    min_value=80,
-                    max_value=800,
-                    value=300,
-                    step=20,
-                    key="gbr_n_estimators_rendimiento",
-                )
-            with c_gbr_2:
-                _gbr_max_depth = st.number_input(
-                    "Profundidad",
-                    min_value=2,
-                    max_value=5,
-                    value=3,
-                    step=1,
-                    key="gbr_max_depth_rendimiento",
-                )
-
-            c_train_1, c_train_2 = st.columns(2)
-            with c_train_1:
-                _solo_historico_anterior = st.checkbox(
-                    "Entrenar solo con datos anteriores al rango visible",
-                    value=True,
-                    key="gbr_solo_historico_anterior",
-                    help=(
-                        "Evita que el período que estás evaluando se use para calibrar su propio estimado."
-                    ),
-                )
-            with c_train_2:
-                _dias_exclusion_entrenamiento = st.number_input(
-                    "Exclusión antes del rango [días]",
-                    min_value=0,
-                    max_value=90,
-                    value=14,
-                    step=1,
-                    key="gbr_dias_exclusion_entrenamiento",
-                )
-
-            st.markdown("**Exclusiones por datos no confiables**")
-            _excluir_evento_bajo_nivel = st.checkbox(
-                "Excluir evento bajo nivel reactor",
-                value=True,
-                key="excluir_evento_bajo_nivel_modelo",
-                help=(
-                    "Excluye el período con baja productividad por bajo nivel no detectado. "
-                    "Abril 2025 queda incluido por defecto."
-                ),
-            )
-
-            c_exc_1, c_exc_2 = st.columns(2)
-            with c_exc_1:
-                _inicio_evento_bajo_nivel = st.date_input(
-                    "Inicio evento",
-                    value=pd.Timestamp("2024-11-01").date(),
-                    key="inicio_evento_bajo_nivel_modelo",
-                )
-            with c_exc_2:
-                _fin_evento_bajo_nivel = st.date_input(
-                    "Fin evento",
-                    value=pd.Timestamp("2025-03-31").date(),
-                    key="fin_evento_bajo_nivel_modelo",
-                )
-
-            _min_puntos_entrenamiento = st.number_input(
-                "Mínimo puntos entrenamiento",
-                min_value=30,
-                max_value=2000,
-                value=120,
-                step=10,
-                key="min_puntos_entrenamiento_gbr",
-            )
-
-            if not SKLEARN_DISPONIBLE:
-                st.error(
-                    "scikit-learn no está disponible. Agregá scikit-learn a requirements.txt "
-                    "o usá la versión anterior."
-                )
-
-            st.info(
-                "Uso diagnóstico: si Real - Estimado es negativo de forma sostenida, "
-                "puede indicar pérdida de actividad del catalizador por contaminante o necesidad de revisar lechos."
-            )
-
-    _presion_ok = (_presion > 30.0) & (_presion < 31.0)
-
-    # ----------------------------------------------------------------------
-    # Variables derivadas para el modelo
-    # ----------------------------------------------------------------------
-    if "C_Donor" in df_agrup.columns:
-        _cdonor_num = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
-        df_agrup["Sin_C_Donor_modelo"] = np.where(
-            _cdonor_num.fillna(0.0) <= 0.001,
-            1.0,
-            0.0,
-        )
+    _producto_norm = None
+    if "Producto" in df_agrup.columns:
+        _producto_norm = df_agrup["Producto"].map(normalizar_producto_operativo).astype("string")
     else:
-        df_agrup["Sin_C_Donor_modelo"] = np.nan
+        _producto_norm = pd.Series(pd.NA, index=df_agrup.index, dtype="string")
 
-    # Relación TEA/C-Donor. Cuando no hay donor, la relación es indefinida:
-    # se deja en NaN y el imputador del modelo usa la mediana del histórico válido.
-    _rel_excel = None
-    if "Rel_TEA_CDonor" in df_agrup.columns:
-        _rel_excel = pd.to_numeric(df_agrup["Rel_TEA_CDonor"], errors="coerce")
+    _grado_polvo_ref = []
+    _rango_xs_ref = []
+    _target_ref = []
+    _usa_mfi_pellets_ref = []
 
-    _rel_calc = None
-    if all(c in df_agrup.columns for c in ["TEA", "C_Donor"]):
-        _tea = pd.to_numeric(df_agrup["TEA"], errors="coerce")
-        _cdonor = pd.to_numeric(df_agrup["C_Donor"], errors="coerce")
-        _rel_calc = (_tea / _cdonor.where(_cdonor.abs() > 0.001)).replace(
-            [np.inf, -np.inf],
-            np.nan,
+    for _prod in _producto_norm:
+        _info = _map_producto_ref.get(str(_prod)) if not pd.isna(_prod) else None
+        if _info is None:
+            _grado_polvo_ref.append(pd.NA)
+            _rango_xs_ref.append(pd.NA)
+            _target_ref.append(np.nan)
+            _usa_mfi_pellets_ref.append(False)
+        else:
+            _grado_polvo_ref.append(_info.get("grado_polvo", pd.NA))
+            _rango_xs_ref.append(_info.get("rango_xs", pd.NA))
+            _target_ref.append(_info.get("target", np.nan))
+            _usa_mfi_pellets_ref.append(bool(_info.get("usa_mfi_pellets", False)))
+
+    df_agrup["Producto_normalizado_referencia"] = _producto_norm
+    df_agrup["Grado_polvo_referencia"] = pd.Series(_grado_polvo_ref, index=df_agrup.index, dtype="string")
+    df_agrup["Rango_XS_referencia"] = pd.Series(_rango_xs_ref, index=df_agrup.index, dtype="string")
+    df_agrup["Target_operativo_producto"] = pd.to_numeric(pd.Series(_target_ref, index=df_agrup.index), errors="coerce")
+
+    _propano = pd.to_numeric(df_agrup["Conc_propano"], errors="coerce") if "Conc_propano" in df_agrup.columns else pd.Series(np.nan, index=df_agrup.index)
+    _slurry = pd.to_numeric(df_agrup["Slurry"], errors="coerce") if "Slurry" in df_agrup.columns else pd.Series(np.nan, index=df_agrup.index)
+    _mfi_polvo = pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") if "MFI_polvo" in df_agrup.columns else pd.Series(np.nan, index=df_agrup.index)
+
+    # La columna V del Excel de referencia usa MFI Polvo. No se reemplaza por MFI pellets
+    # para mantener trazabilidad exacta contra la correlación original.
+    _mfi_modelo = _mfi_polvo
+
+    _estimado = pd.Series(np.nan, index=df_agrup.index, dtype=float)
+    _estimado_disponible = pd.Series(0.0, index=df_agrup.index, dtype=float)
+    _detalle_modelo = []
+
+    for _idx in df_agrup.index:
+        _gp = df_agrup.at[_idx, "Grado_polvo_referencia"]
+        _rxs = df_agrup.at[_idx, "Rango_XS_referencia"]
+        _coef = _coef_para_familia(_gp, _rxs)
+
+        if _coef is None:
+            _detalle_modelo.append("Sin correlación validada para familia/rango")
+            continue
+
+        _val_prop = _propano.loc[_idx]
+        _val_slurry = _slurry.loc[_idx]
+        _val_mfi = _mfi_modelo.loc[_idx]
+
+        # Requerir solo variables con coeficiente distinto de cero.
+        # Así K 3-5 y L no quedan sin estimado por MFI/slurry aunque esos coeficientes sean 0.
+        _faltan = []
+        if abs(_coef["propano"]) > 1e-12 and pd.isna(_val_prop):
+            _faltan.append("% Propano")
+        if abs(_coef["slurry"]) > 1e-12 and pd.isna(_val_slurry):
+            _faltan.append("Slurry")
+        if abs(_coef["mfi"]) > 1e-12 and pd.isna(_val_mfi):
+            _faltan.append("MFI polvo")
+
+        if _faltan:
+            _detalle_modelo.append("Faltan variables: " + ", ".join(_faltan))
+            continue
+
+        _est = (
+            _coef["intercepto"]
+            + _coef["propano"] * (0.0 if pd.isna(_val_prop) else float(_val_prop))
+            + _coef["slurry"] * (0.0 if pd.isna(_val_slurry) else float(_val_slurry))
+            + _coef["mfi"] * (0.0 if pd.isna(_val_mfi) else float(_val_mfi))
         )
 
-    if _rel_excel is not None and _rel_calc is not None:
-        _rel = _rel_excel.fillna(_rel_calc)
-    elif _rel_excel is not None:
-        _rel = _rel_excel
-    elif _rel_calc is not None:
-        _rel = _rel_calc
-    else:
-        _rel = pd.Series(np.nan, index=df_agrup.index)
+        # Filtro de plausibilidad amplio. No corrige contra el real ni entrena con outliers;
+        # solo evita mostrar valores físicamente disparatados si entra un dato corrupto.
+        if np.isfinite(_est) and (-5.0 <= _est <= 40.0):
+            _estimado.loc[_idx] = float(_est)
+            _estimado_disponible.loc[_idx] = 1.0
+            _detalle_modelo.append("OK - correlación referencia")
+        else:
+            _detalle_modelo.append("Estimado fuera de rango plausible")
 
-    df_agrup["Rel_TEA_CDonor_modelo"] = _rel
-    if "Sin_C_Donor_modelo" in df_agrup.columns:
-        df_agrup.loc[
-            pd.to_numeric(df_agrup["Sin_C_Donor_modelo"], errors="coerce").fillna(0.0) > 0.5,
-            "Rel_TEA_CDonor_modelo",
-        ] = np.nan
-
-    # Variables críticas candidatas.
-    # PRODUCTO no entra en el cálculo; el grado queda solo para filtrar/visualizar.
-    _features_candidatas = [
-        "MFI_polvo",
-        "XS",
-        "Conc_H2",
-        "Conc_propano",
-        "Slurry",
-        "Rel_TEA_CDonor_modelo",
-        "C_Donor",
-        "Sin_C_Donor_modelo",
-        "Temperatura_R2301",
-        "Tipo_catalizador_productividad",
-        "Indicador_ZN389_activo",
-    ]
-
-    _features = []
-    for _f in _features_candidatas:
-        if _f in df_agrup.columns:
-            _serie = pd.to_numeric(df_agrup[_f], errors="coerce")
-            if _serie.notna().sum() >= 20:
-                _features.append(_f)
-
-    _estimado = np.full(len(df_agrup), np.nan)
-    _conf = np.full(len(df_agrup), np.nan)
-    _dist_min = np.full(len(df_agrup), np.nan)
-    _n_vecinos_usados = np.full(len(df_agrup), np.nan)
-    _indicador_base = np.zeros(len(df_agrup))
-    _modelo_status = "Sin modelo"
-    _n_train = 0
-
-    if len(_features) >= 3 and SKLEARN_DISPONIBLE:
-        # Conjunto histórico válido. Se excluyen datos malos, no cambios de lecho.
-        _base_mask = (
-            _presion_ok
-            & _rendimiento.notna()
-            & _fecha.notna()
-        )
-
-        if bool(_excluir_evento_bajo_nivel):
-            _evento_bajo_nivel = (
-                (_fecha >= pd.Timestamp(_inicio_evento_bajo_nivel))
-                & (
-                    _fecha
-                    <= pd.Timestamp(_fin_evento_bajo_nivel)
-                    + pd.Timedelta(days=1)
-                    - pd.Timedelta(seconds=1)
-                )
-            )
-            _base_mask = _base_mask & (~_evento_bajo_nivel)
-
-        # Evitar auto-calibración del rango visible.
-        if bool(_solo_historico_anterior):
-            _inicio_visible = pd.Timestamp(desde) - pd.Timedelta(days=int(_dias_exclusion_entrenamiento))
-            _base_mask = _base_mask & (_fecha < _inicio_visible)
-
-        # Filtros de operación normal si existen.
-        if "Nivel_R2301" in df_agrup.columns:
-            _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
-            _base_mask = _base_mask & (_nivel > 60.0) & (_nivel < 70.0)
-
-        if "Calor_reaccion_URA" in df_agrup.columns:
-            _ura = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
-            _base_mask = _base_mask & (_ura > 8000.0) & (_ura < 13000.0)
-
-        if "Slurry" in _features:
-            _base_mask = _base_mask & (
-                pd.to_numeric(df_agrup["Slurry"], errors="coerce") > 50.0
-            )
-
-        if "MFI_polvo" in _features:
-            _base_mask = _base_mask & (
-                pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") > 0.0
-            )
-
-        if "Conc_propano" in _features:
-            _base_mask = _base_mask & (
-                pd.to_numeric(df_agrup["Conc_propano"], errors="coerce") > 0.0
-            )
-
-        if "Conc_H2" in _features:
-            _base_mask = _base_mask & (
-                pd.to_numeric(df_agrup["Conc_H2"], errors="coerce") > 0.0
-            )
-
-        _x_all = df_agrup[_features].copy()
-        for _f in _features:
-            _x_all[_f] = pd.to_numeric(_x_all[_f], errors="coerce")
-
-        # El modelo acepta NaN por imputación, pero se exige que cada fila tenga
-        # una cantidad mínima de variables críticas observadas.
-        _min_features_validas = max(3, int(np.ceil(len(_features) * 0.55)))
-        _filas_con_features = _x_all.notna().sum(axis=1) >= _min_features_validas
-        _base_final = _base_mask & _filas_con_features
-
-        _n_train = int(_base_final.sum())
-
-        if _n_train >= int(_min_puntos_entrenamiento):
-            _x_train = _x_all.loc[_base_final, _features]
-            _y_train = _rendimiento.loc[_base_final]
-
-            if _metodo_estimacion.startswith("Gradient Boosting quantile"):
-                _reg = GradientBoostingRegressor(
-                    loss="quantile",
-                    alpha=float(_percentil_benchmark),
-                    n_estimators=int(_gbr_n_estimators),
-                    max_depth=int(_gbr_max_depth),
-                    learning_rate=0.03,
-                    min_samples_leaf=5,
-                    random_state=42,
-                )
-                _modelo_status = f"Gradient Boosting quantile P{int(float(_percentil_benchmark) * 100)}"
-            else:
-                _reg = GradientBoostingRegressor(
-                    loss="absolute_error",
-                    n_estimators=int(_gbr_n_estimators),
-                    max_depth=int(_gbr_max_depth),
-                    learning_rate=0.03,
-                    min_samples_leaf=5,
-                    random_state=42,
-                )
-                _modelo_status = "Gradient Boosting promedio robusto"
-
-            _modelo = make_pipeline(
-                SimpleImputer(strategy="median"),
-                _reg,
-            )
-
-            try:
-                _modelo.fit(_x_train, _y_train)
-                _pred = _modelo.predict(_x_all[_features])
-
-                # Evitar extrapolaciones absurdas fuera del rango histórico válido.
-                _q01 = float(_y_train.quantile(0.01))
-                _q99 = float(_y_train.quantile(0.99))
-                _iqr_y = float(_y_train.quantile(0.75) - _y_train.quantile(0.25))
-                _margen_y = max(1.50, 0.75 * _iqr_y)
-
-                _pred = np.clip(
-                    _pred,
-                    _q01 - _margen_y,
-                    _q99 + _margen_y,
-                )
-
-                _estimado = _pred.astype(float)
-
-                # Diagnóstico simple de confianza.
-                _conf_base = min(100.0, 100.0 * _n_train / max(float(_min_puntos_entrenamiento), 1.0))
-                _conf[:] = _conf_base
-                _n_vecinos_usados[:] = float(_n_train)
-                _indicador_base[_base_final.to_numpy(dtype=bool)] = 1.0
-
-            except Exception as _exc_modelo:
-                _modelo_status = f"Error modelo: {_exc_modelo}"
-
-    df_agrup["Productividad_estimada"] = pd.Series(_estimado, index=df_agrup.index)
-    df_agrup["Rendimiento_esperado_producto"] = pd.Series(_estimado, index=df_agrup.index)
-
-    # Variables auxiliares mantenidas por compatibilidad con el resto de la app.
-    df_agrup["Target_operativo_producto"] = np.nan
-    df_agrup["Maximo_historico_validado_producto"] = np.nan
-    df_agrup["Distancia_benchmark_productividad"] = pd.Series(_dist_min, index=df_agrup.index)
-    df_agrup["Confiabilidad_benchmark_productividad"] = pd.Series(_conf, index=df_agrup.index)
-    df_agrup["N_vecinos_benchmark_productividad"] = pd.Series(_n_vecinos_usados, index=df_agrup.index)
-    df_agrup["Indicador_target_optimo_productividad"] = pd.Series(_indicador_base, index=df_agrup.index)
+    df_agrup["Productividad_estimada"] = _estimado
+    df_agrup["Rendimiento_esperado_producto"] = _estimado
+    df_agrup["Estimado_disponible_referencia"] = _estimado_disponible
+    df_agrup["Confiabilidad_benchmark_productividad"] = _estimado_disponible * 100.0
+    df_agrup["N_vecinos_benchmark_productividad"] = np.nan
+    df_agrup["Indicador_target_optimo_productividad"] = _estimado_disponible
     df_agrup["Percentil_rendimiento_base"] = np.nan
+    df_agrup["Maximo_historico_validado_producto"] = np.nan
 
     df_agrup["Desvio_vs_productividad_estimada"] = (
         pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
@@ -2114,38 +1912,66 @@ if unidad.startswith("Polimer") and all(
         / pd.to_numeric(df_agrup["Productividad_estimada"], errors="coerce")
     ).replace([np.inf, -np.inf], np.nan)
 
-    _desvio_tmp = pd.to_numeric(
-        df_agrup["Desvio_vs_productividad_estimada"],
-        errors="coerce",
-    )
+    _desvio_tmp = pd.to_numeric(df_agrup["Desvio_vs_productividad_estimada"], errors="coerce")
+    df_agrup["Alerta_baja_actividad"] = np.where(_desvio_tmp <= -1.0, 1.0, 0.0)
+    df_agrup.loc[_desvio_tmp.isna(), "Alerta_baja_actividad"] = np.nan
 
-    df_agrup["Alerta_baja_actividad"] = np.where(
-        _desvio_tmp <= -1.0,
-        1.0,
-        0.0,
+    df_agrup["Gap_vs_target_operativo"] = (
+        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
+        - pd.to_numeric(df_agrup["Target_operativo_producto"], errors="coerce")
     )
-
-    df_agrup["Gap_vs_target_operativo"] = np.nan
     df_agrup["Gap_vs_maximo_historico"] = np.nan
-    df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
-    df_agrup["Periodo_base_productividad_2024"] = pd.Series(
-        _indicador_base,
-        index=df_agrup.index,
-    )
+
+    if "Presion_R2301" in df_agrup.columns:
+        _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
+        _presion_ok = (_presion > 30.0) & (_presion < 31.0)
+        df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
+    else:
+        df_agrup["Presion_operacion_OK"] = np.nan
+
+    df_agrup["Periodo_base_productividad_2024"] = _estimado_disponible
 
     with sidebar_modelo:
-        with st.expander("Diagnóstico rendimiento estimado", expanded=False):
-            st.write(f"**Método:** {_modelo_status}")
-            st.write(f"**Puntos entrenamiento:** {_n_train:,}")
-            st.write(f"**Variables usadas:** {len(_features)}")
-            if _features:
-                st.code("\\n".join(_features), language="text")
-            if _n_train < int(_min_puntos_entrenamiento):
-                st.warning(
-                    "Hay pocos puntos de entrenamiento con los filtros actuales. "
-                    "Bajá el mínimo o revisá exclusiones/filtros."
-                )
+        st.markdown("---")
+        st.subheader("Modelo rendimiento estimado")
+        with st.expander("Correlación de referencia", expanded=False):
+            st.caption(
+                "Correlación tomada de 'Curvas de productividad (2025 - 2026).xlsx' "
+                "→ hoja DATOS → columna V 'Estimado'. No usa cambio de lecho ni ajusta contra el real actual."
+            )
+            st.code(
+                "K, XS 3-5: Est = 24.47 - 0.2198·Propano\n"
+                "K, XS 2-4: Est = 21.94394 - 0.20900·Propano - 0.011743·Slurry + 0.33498·MFI\n"
+                "L: Est = 26.838 - 0.3041·Propano\n"
+                "H: Est = 59.93305 - 0.16619·Propano - 0.60735·Slurry - 1.06518·MFI",
+                language="text",
+            )
 
+            _diag_corr = pd.DataFrame(
+                [
+                    {"Familia": "K", "Rango X-S": "3-5", "Intercepto": 24.47, "Propano": -0.2198, "Slurry": 0.0, "MFI": 0.0},
+                    {"Familia": "K", "Rango X-S": "2-4", "Intercepto": 21.943937610345401, "Propano": -0.20900191282896072, "Slurry": -0.011743057462415179, "MFI": 0.33497778099646869},
+                    {"Familia": "L", "Rango X-S": "*", "Intercepto": 26.838, "Propano": -0.3041, "Slurry": 0.0, "MFI": 0.0},
+                    {"Familia": "H", "Rango X-S": "*", "Intercepto": 59.933053369846832, "Propano": -0.16619206190972843, "Slurry": -0.60734925212800905, "MFI": -1.0651802506881705},
+                ]
+            )
+            st.dataframe(_diag_corr, width="stretch", hide_index=True)
+
+            _total = len(df_agrup)
+            _ok = int(_estimado_disponible.sum())
+            st.metric("Puntos con estimado", f"{_ok:,} / {_total:,}")
+
+            _familias_sin_corr = (
+                df_agrup.loc[_estimado_disponible <= 0.0, ["Producto_normalizado_referencia", "Grado_polvo_referencia", "Rango_XS_referencia"]]
+                .dropna(how="all")
+                .drop_duplicates()
+            )
+            if len(_familias_sin_corr) > 0:
+                st.warning(
+                    "Hay productos/familias sin correlación en la planilla de referencia. "
+                    "La app deja esos estimados en blanco para no inventar valores."
+                )
+                st.dataframe(_familias_sin_corr, width="stretch", hide_index=True)
 
 # Mascara inicial: rango de fechas
 mask = (
