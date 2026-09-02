@@ -1187,11 +1187,13 @@ if unidad.startswith("Polimer") and all(
     # Las variables auxiliares del modelo de target se calculan internamente,
     # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
-        "Productividad_estimada": "Rendimiento estimado",
-        "Desvio_vs_productividad_estimada": "Desvío vs rendimiento estimado [Real - Estimado]",
-        "Indice_actividad_vs_estimado": "Índice actividad vs estimado [Real / Estimado]",
+        "Productividad_estimada": "Rendimiento ideal [máximo validado]",
+        "Detalle_estimado_referencia": "Detalle rendimiento ideal",
+        "Estimado_disponible_referencia": "Ideal disponible [0/1]",
+        "Desvio_vs_productividad_estimada": "Desvío vs rendimiento ideal [Real - Ideal]",
+        "Indice_actividad_vs_estimado": "Índice actividad vs ideal [Real / Ideal]",
         "Alerta_baja_actividad": "Alerta baja actividad [1 = revisar]",
-        "Confiabilidad_benchmark_productividad": "Disponibilidad correlación referencia [%]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad rendimiento ideal [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1703,31 +1705,18 @@ filtro_producto_activo = unidad.startswith("Polimer") and len(productos_sel) > 0
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
 
-# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO
-# ================================================================================
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO IDEAL
+# ==============================================================================
 # Criterio corregido:
-# - Se elimina el modelo estadístico/ML que veníamos probando porque no daba confianza.
-# - Se implementa la correlación de referencia del archivo:
-#   "Curvas de productividad (2025 - 2026).xlsx", hoja DATOS, columna V "Estimado".
-# - El estimado NO se entrena con el rendimiento real actual.
-# - El estimado depende de: grado polvo/familia, rango X-S, % propano, slurry y MFI polvo.
+# - Para diagnóstico de lechos/contaminantes no conviene que el estimado quede en blanco.
+# - Tampoco conviene forzar una correlación no confiable para familias sin fórmula validada.
+# - Se define entonces un "Rendimiento ideal" como el máximo histórico VALIDADO
+#   alcanzado para el grado producido correctamente.
+# - La comparación principal pasa a ser:
+#       Desvío = Rendimiento real - Rendimiento ideal
 #
-# Fórmula de referencia del Excel:
-#   Si Grado Polvo = K y Rango X-S = 3-5:
-#       Est = 24.47 - 0.2198 * Propano
-#   Si Grado Polvo = K y Rango X-S = 2-4:
-#       Est = 21.943937610345401 - 0.20900191282896072 * Propano
-#             - 0.011743057462415179 * Slurry + 0.33497778099646869 * MFI
-#   Si Grado Polvo = L:
-#       Est = 26.838 - 0.3041 * Propano
-#   Si Grado Polvo = H:
-#       Est = 59.933053369846832 - 0.16619206190972843 * Propano
-#             - 0.60734925212800905 * Slurry - 1.0651802506881705 * MFI
-#
-# Nota importante:
-# En la planilla de referencia NO hay estimación para familias S, T, H KFM, H FFM
-# ni T ZN389. En esos casos la app deja el estimado en blanco para no inventar
-# una correlación no validada.
+# El máximo se calcula después de limpiar outliers y aplicar filtros de operación normal.
+# Si un grado no tiene suficientes puntos, se usa fallback por grupo/familia y luego global.
 
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
@@ -1740,167 +1729,340 @@ if unidad.startswith("Polimer") and all(
     _fecha = pd.to_datetime(df_agrup["Fecha_y_hora"], errors="coerce")
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
 
-    _coef_ref = {
-        ("K", "3-5"): {
-            "intercepto": 24.47,
-            "propano": -0.2198,
-            "slurry": 0.0,
-            "mfi": 0.0,
-        },
-        ("K", "2-4"): {
-            "intercepto": 21.943937610345401,
-            "propano": -0.20900191282896072,
-            "slurry": -0.011743057462415179,
-            "mfi": 0.33497778099646869,
-        },
-        ("L", "*"): {
-            "intercepto": 26.838,
-            "propano": -0.3041,
-            "slurry": 0.0,
-            "mfi": 0.0,
-        },
-        ("H", "*"): {
-            "intercepto": 59.933053369846832,
-            "propano": -0.16619206190972843,
-            "slurry": -0.60734925212800905,
-            "mfi": -1.0651802506881705,
-        },
-    }
+    with sidebar_modelo:
+        st.markdown("---")
+        st.subheader("Modelo rendimiento ideal")
+        with st.expander("Rendimiento ideal histórico", expanded=False):
+            st.caption(
+                "El ideal se calcula como máximo histórico validado del grado, "
+                "con outliers y períodos no confiables excluidos. "
+                "Sirve para medir qué tan lejos estamos del mejor rendimiento alcanzado."
+            )
 
-    # Mapeo de referencia tomado de Hoja4 del Excel de curvas.
-    # Se usa el grado normalizado de la app, sin sufijos TE.
-    _map_producto_ref = {
-        "KFM6110": {"grado_polvo": "H KFM", "rango_xs": "4,5-6", "target": 17.241379310344826, "usa_mfi_pellets": False},
-        "HYS6200": {"grado_polvo": "H", "rango_xs": "3-5", "target": 14.084507042253522, "usa_mfi_pellets": True},
-        "KYD6110": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": True},
-        "KED6270": {"grado_polvo": "K", "rango_xs": "2-4", "target": 14.705882352941176, "usa_mfi_pellets": True},
-        "LYD6200K": {"grado_polvo": "L", "rango_xs": "2-4", "target": 15.15151515151515, "usa_mfi_pellets": True},
-        "SMD6200": {"grado_polvo": "S", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
-        "RFD6140K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
-        "XSD6601K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
-        "WSD6601K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
-        "XSD6200T": {"grado_polvo": "T", "rango_xs": "3-5", "target": 18.518518518518519, "usa_mfi_pellets": False},
-        "XMD6279T": {"grado_polvo": "T", "rango_xs": "2,5-4,5", "target": 18.518518518518519, "usa_mfi_pellets": False},
-        "RFD6190K": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.873015873015873, "usa_mfi_pellets": False},
-        "RFM6270": {"grado_polvo": "K", "rango_xs": "3-5", "target": 15.15151515151515, "usa_mfi_pellets": False},
-    }
+            _criterio_ideal = st.selectbox(
+                "Criterio de ideal",
+                options=[
+                    "Máximo validado por grado",
+                    "Promedio top 3 por grado",
+                    "Percentil 95 por grado",
+                ],
+                index=0,
+                key="criterio_rendimiento_ideal",
+                help=(
+                    "Máximo validado usa el mayor rendimiento después de filtrar outliers. "
+                    "Promedio top 3 suaviza un poco. Percentil 95 es más conservador."
+                ),
+            )
 
-    def _normalizar_rango_ref(valor):
-        if valor is None or pd.isna(valor):
-            return ""
-        txt = str(valor).strip().replace(" ", "")
-        txt = txt.replace(",", ".")
-        if txt in ["3.0-5.0", "3-5", "3.0-5"]:
-            return "3-5"
-        if txt in ["2.0-4.0", "2-4", "2.0-4"]:
-            return "2-4"
-        if txt in ["4.5-6.0", "4.5-6", "4,5-6"]:
-            return "4,5-6"
-        if txt in ["2.5-4.5", "2,5-4,5"]:
-            return "2,5-4,5"
-        return str(valor).strip()
+            c_ideal_1, c_ideal_2 = st.columns(2)
+            with c_ideal_1:
+                _min_puntos_grado_ideal = st.number_input(
+                    "Mín. puntos por grado",
+                    min_value=2,
+                    max_value=30,
+                    value=4,
+                    step=1,
+                    key="min_puntos_grado_ideal",
+                    help="Si un grado tiene menos puntos válidos, se usa fallback por grupo o global.",
+                )
+            with c_ideal_2:
+                _usar_filtro_iqr_ideal = st.checkbox(
+                    "Excluir outliers IQR",
+                    value=True,
+                    key="usar_filtro_iqr_ideal",
+                    help="Quita puntos extremos antes de calcular el máximo validado.",
+                )
 
-    def _coef_para_familia(grado_polvo, rango_xs):
-        grado_polvo = str(grado_polvo).strip().upper() if grado_polvo is not None and not pd.isna(grado_polvo) else ""
-        rango_xs = _normalizar_rango_ref(rango_xs)
-        if (grado_polvo, rango_xs) in _coef_ref:
-            return _coef_ref[(grado_polvo, rango_xs)]
-        if (grado_polvo, "*") in _coef_ref:
-            return _coef_ref[(grado_polvo, "*")]
-        return None
+            _usar_filtros_operacion_ideal = st.checkbox(
+                "Usar filtros de operación normal",
+                value=True,
+                key="usar_filtros_operacion_ideal",
+                help=(
+                    "Aplica filtros típicos de reactor: presión 30-31, nivel 60-70, "
+                    "URA 8000-13000, MFI > 0, slurry > 50, cuando esas variables existan."
+                ),
+            )
 
-    _producto_norm = None
+            _excluir_evento_bajo_nivel_ideal = st.checkbox(
+                "Excluir evento bajo nivel reactor",
+                value=True,
+                key="excluir_evento_bajo_nivel_ideal",
+                help="Excluye el período histórico con productividad afectada por bajo nivel no detectado.",
+            )
+
+            c_exc_ideal_1, c_exc_ideal_2 = st.columns(2)
+            with c_exc_ideal_1:
+                _inicio_evento_bajo_nivel_ideal = st.date_input(
+                    "Inicio evento",
+                    value=pd.Timestamp("2024-11-01").date(),
+                    key="inicio_evento_bajo_nivel_ideal",
+                )
+            with c_exc_ideal_2:
+                _fin_evento_bajo_nivel_ideal = st.date_input(
+                    "Fin evento",
+                    value=pd.Timestamp("2025-03-31").date(),
+                    key="fin_evento_bajo_nivel_ideal",
+                    help="Marzo 2025 por defecto para dejar abril 2025 dentro del histórico válido.",
+                )
+
+            st.info(
+                "Interpretación: Real - Ideal negativo y sostenido = pérdida frente al máximo histórico validado. "
+                "Esto puede orientar revisión de contaminantes, actividad catalítica o cambio de lechos."
+            )
+
+    def _familia_fallback_producto(_prod):
+        if _prod is None or pd.isna(_prod):
+            return pd.NA
+        txt = str(_prod).upper().strip()
+        if not txt:
+            return pd.NA
+        if "KFM" in txt:
+            return "KFM"
+        if re.search(r"6200T|6279T|\bT$", txt):
+            return "T"
+        if txt.startswith("SMD") or re.search(r"6200$", txt):
+            return "S"
+        if txt.startswith("LYD"):
+            return "L"
+        if txt.startswith("HYS"):
+            return "H"
+        # Para los grados K habituales: RFD, KYD, XSD/WSD con sufijo K, KED/RFM.
+        if txt.startswith(("RFD", "KYD", "KED", "RFM")) or txt.endswith("K"):
+            return "K"
+        # Fallback genérico: prefijo alfabético inicial.
+        m = re.match(r"([A-Z]+)", txt)
+        return m.group(1) if m else pd.NA
+
+    def _maximo_validado_serie(_serie, criterio, usar_iqr=True):
+        y = pd.to_numeric(_serie, errors="coerce").dropna()
+        y = y[(y > 0.0) & (y < 40.0)]
+        if len(y) == 0:
+            return np.nan, 0, np.nan, np.nan, np.nan
+
+        y_original = y.copy()
+        if usar_iqr and len(y) >= 6:
+            q1 = float(y.quantile(0.25))
+            q3 = float(y.quantile(0.75))
+            iqr = q3 - q1
+            if np.isfinite(iqr) and iqr > 0:
+                lim_inf = q1 - 1.5 * iqr
+                lim_sup = q3 + 1.5 * iqr
+                y_filtrada = y[(y >= lim_inf) & (y <= lim_sup)]
+                if len(y_filtrada) >= max(3, int(len(y) * 0.50)):
+                    y = y_filtrada
+
+        if len(y) == 0:
+            y = y_original
+
+        if criterio.startswith("Promedio top 3"):
+            ideal = float(y.sort_values(ascending=False).head(min(3, len(y))).mean())
+        elif criterio.startswith("Percentil 95"):
+            ideal = float(y.quantile(0.95))
+        else:
+            ideal = float(y.max())
+
+        return ideal, int(len(y)), float(y.median()), float(y.quantile(0.95)), float(y.max())
+
     if "Producto" in df_agrup.columns:
         _producto_norm = df_agrup["Producto"].map(normalizar_producto_operativo).astype("string")
     else:
         _producto_norm = pd.Series(pd.NA, index=df_agrup.index, dtype="string")
 
-    _grado_polvo_ref = []
-    _rango_xs_ref = []
-    _target_ref = []
-    _usa_mfi_pellets_ref = []
-
-    for _prod in _producto_norm:
-        _info = _map_producto_ref.get(str(_prod)) if not pd.isna(_prod) else None
-        if _info is None:
-            _grado_polvo_ref.append(pd.NA)
-            _rango_xs_ref.append(pd.NA)
-            _target_ref.append(np.nan)
-            _usa_mfi_pellets_ref.append(False)
-        else:
-            _grado_polvo_ref.append(_info.get("grado_polvo", pd.NA))
-            _rango_xs_ref.append(_info.get("rango_xs", pd.NA))
-            _target_ref.append(_info.get("target", np.nan))
-            _usa_mfi_pellets_ref.append(bool(_info.get("usa_mfi_pellets", False)))
+    _familia_fallback = _producto_norm.map(_familia_fallback_producto).astype("string")
 
     df_agrup["Producto_normalizado_referencia"] = _producto_norm
-    df_agrup["Grado_polvo_referencia"] = pd.Series(_grado_polvo_ref, index=df_agrup.index, dtype="string")
-    df_agrup["Rango_XS_referencia"] = pd.Series(_rango_xs_ref, index=df_agrup.index, dtype="string")
-    df_agrup["Target_operativo_producto"] = pd.to_numeric(pd.Series(_target_ref, index=df_agrup.index), errors="coerce")
+    df_agrup["Familia_productividad_codigo"] = _familia_fallback
+    df_agrup["Grado_polvo_referencia"] = _familia_fallback
+    df_agrup["Rango_XS_referencia"] = pd.NA
 
-    _propano = pd.to_numeric(df_agrup["Conc_propano"], errors="coerce") if "Conc_propano" in df_agrup.columns else pd.Series(np.nan, index=df_agrup.index)
-    _slurry = pd.to_numeric(df_agrup["Slurry"], errors="coerce") if "Slurry" in df_agrup.columns else pd.Series(np.nan, index=df_agrup.index)
-    _mfi_polvo = pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") if "MFI_polvo" in df_agrup.columns else pd.Series(np.nan, index=df_agrup.index)
+    _mask_ref = (
+        _fecha.notna()
+        & _rendimiento.notna()
+        & _producto_norm.notna()
+        & (_rendimiento > 0.0)
+        & (_rendimiento < 40.0)
+    )
 
-    # La columna V del Excel de referencia usa MFI Polvo. No se reemplaza por MFI pellets
-    # para mantener trazabilidad exacta contra la correlación original.
-    _mfi_modelo = _mfi_polvo
+    if bool(_usar_filtros_operacion_ideal):
+        if "Presion_R2301" in df_agrup.columns:
+            _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
+            _mask_ref = _mask_ref & (_presion > 30.0) & (_presion < 31.0)
+        else:
+            _presion = pd.Series(np.nan, index=df_agrup.index)
+
+        if "Nivel_R2301" in df_agrup.columns:
+            _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
+            _mask_ref = _mask_ref & (_nivel > 60.0) & (_nivel < 70.0)
+
+        if "Calor_reaccion_URA" in df_agrup.columns:
+            _ura = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
+            _mask_ref = _mask_ref & (_ura > 8000.0) & (_ura < 13000.0)
+
+        if "MFI_polvo" in df_agrup.columns:
+            _mfi = pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce")
+            _mask_ref = _mask_ref & (_mfi > 0.0)
+
+        if "Slurry" in df_agrup.columns:
+            _slurry = pd.to_numeric(df_agrup["Slurry"], errors="coerce")
+            _mask_ref = _mask_ref & (_slurry > 50.0)
+    else:
+        if "Presion_R2301" in df_agrup.columns:
+            _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
+        else:
+            _presion = pd.Series(np.nan, index=df_agrup.index)
+
+    if bool(_excluir_evento_bajo_nivel_ideal):
+        _evento_bajo_nivel = (
+            (_fecha >= pd.Timestamp(_inicio_evento_bajo_nivel_ideal))
+            & (
+                _fecha
+                <= pd.Timestamp(_fin_evento_bajo_nivel_ideal)
+                + pd.Timedelta(days=1)
+                - pd.Timedelta(seconds=1)
+            )
+        )
+        _mask_ref = _mask_ref & (~_evento_bajo_nivel)
+
+    _ref = pd.DataFrame(
+        {
+            "Producto": _producto_norm,
+            "Familia": _familia_fallback,
+            "Rendimiento": _rendimiento,
+            "Fecha_y_hora": _fecha,
+        },
+        index=df_agrup.index,
+    ).loc[_mask_ref].copy()
+
+    _stats_producto = {}
+    _stats_familia = {}
+    _filas_stats = []
+
+    for _prod, _grp in _ref.groupby("Producto", dropna=True):
+        _ideal, _n, _med, _p95, _max = _maximo_validado_serie(
+            _grp["Rendimiento"],
+            _criterio_ideal,
+            bool(_usar_filtro_iqr_ideal),
+        )
+        if np.isfinite(_ideal):
+            _stats_producto[str(_prod)] = {
+                "ideal": _ideal,
+                "n": _n,
+                "mediana": _med,
+                "p95": _p95,
+                "max": _max,
+            }
+            _filas_stats.append(
+                {
+                    "Nivel": "Grado",
+                    "Grupo": str(_prod),
+                    "Ideal": _ideal,
+                    "n_validos": _n,
+                    "Mediana": _med,
+                    "P95": _p95,
+                    "Max": _max,
+                }
+            )
+
+    for _fam, _grp in _ref.groupby("Familia", dropna=True):
+        _ideal, _n, _med, _p95, _max = _maximo_validado_serie(
+            _grp["Rendimiento"],
+            _criterio_ideal,
+            bool(_usar_filtro_iqr_ideal),
+        )
+        if np.isfinite(_ideal):
+            _stats_familia[str(_fam)] = {
+                "ideal": _ideal,
+                "n": _n,
+                "mediana": _med,
+                "p95": _p95,
+                "max": _max,
+            }
+            _filas_stats.append(
+                {
+                    "Nivel": "Familia fallback",
+                    "Grupo": str(_fam),
+                    "Ideal": _ideal,
+                    "n_validos": _n,
+                    "Mediana": _med,
+                    "P95": _p95,
+                    "Max": _max,
+                }
+            )
+
+    _ideal_global, _n_global, _med_global, _p95_global, _max_global = _maximo_validado_serie(
+        _ref["Rendimiento"] if len(_ref) else pd.Series(dtype=float),
+        _criterio_ideal,
+        bool(_usar_filtro_iqr_ideal),
+    )
 
     _estimado = pd.Series(np.nan, index=df_agrup.index, dtype=float)
-    _estimado_disponible = pd.Series(0.0, index=df_agrup.index, dtype=float)
-    _detalle_modelo = []
+    _ideal_disponible = pd.Series(0.0, index=df_agrup.index, dtype=float)
+    _detalle_modelo = pd.Series("Sin producto", index=df_agrup.index, dtype="string")
+    _conf = pd.Series(np.nan, index=df_agrup.index, dtype=float)
+    _n_ref_usados = pd.Series(np.nan, index=df_agrup.index, dtype=float)
+
+    _min_n = int(_min_puntos_grado_ideal)
 
     for _idx in df_agrup.index:
-        _gp = df_agrup.at[_idx, "Grado_polvo_referencia"]
-        _rxs = df_agrup.at[_idx, "Rango_XS_referencia"]
-        _coef = _coef_para_familia(_gp, _rxs)
+        _prod = _producto_norm.loc[_idx]
+        _fam = _familia_fallback.loc[_idx]
 
-        if _coef is None:
-            _detalle_modelo.append("Sin correlación validada para familia/rango")
-            continue
+        _ideal = np.nan
+        _n_usado = 0
+        _detalle = "Sin referencia"
+        _nivel_ref = ""
 
-        _val_prop = _propano.loc[_idx]
-        _val_slurry = _slurry.loc[_idx]
-        _val_mfi = _mfi_modelo.loc[_idx]
+        if not pd.isna(_prod) and str(_prod) in _stats_producto and _stats_producto[str(_prod)]["n"] >= _min_n:
+            _stat = _stats_producto[str(_prod)]
+            _ideal = _stat["ideal"]
+            _n_usado = _stat["n"]
+            _detalle = "OK - máximo validado por grado"
+            _nivel_ref = "grado"
+        elif not pd.isna(_fam) and str(_fam) in _stats_familia and _stats_familia[str(_fam)]["n"] >= _min_n:
+            _stat = _stats_familia[str(_fam)]
+            _ideal = _stat["ideal"]
+            _n_usado = _stat["n"]
+            _detalle = "Fallback - máximo validado por familia/grupo"
+            _nivel_ref = "familia"
+        elif np.isfinite(_ideal_global):
+            _ideal = _ideal_global
+            _n_usado = _n_global
+            _detalle = "Fallback - máximo validado global"
+            _nivel_ref = "global"
 
-        # Requerir solo variables con coeficiente distinto de cero.
-        # Así K 3-5 y L no quedan sin estimado por MFI/slurry aunque esos coeficientes sean 0.
-        _faltan = []
-        if abs(_coef["propano"]) > 1e-12 and pd.isna(_val_prop):
-            _faltan.append("% Propano")
-        if abs(_coef["slurry"]) > 1e-12 and pd.isna(_val_slurry):
-            _faltan.append("Slurry")
-        if abs(_coef["mfi"]) > 1e-12 and pd.isna(_val_mfi):
-            _faltan.append("MFI polvo")
-
-        if _faltan:
-            _detalle_modelo.append("Faltan variables: " + ", ".join(_faltan))
-            continue
-
-        _est = (
-            _coef["intercepto"]
-            + _coef["propano"] * (0.0 if pd.isna(_val_prop) else float(_val_prop))
-            + _coef["slurry"] * (0.0 if pd.isna(_val_slurry) else float(_val_slurry))
-            + _coef["mfi"] * (0.0 if pd.isna(_val_mfi) else float(_val_mfi))
-        )
-
-        # Filtro de plausibilidad amplio. No corrige contra el real ni entrena con outliers;
-        # solo evita mostrar valores físicamente disparatados si entra un dato corrupto.
-        if np.isfinite(_est) and (-5.0 <= _est <= 40.0):
-            _estimado.loc[_idx] = float(_est)
-            _estimado_disponible.loc[_idx] = 1.0
-            _detalle_modelo.append("OK - correlación referencia")
+        if np.isfinite(_ideal):
+            _estimado.loc[_idx] = float(_ideal)
+            _ideal_disponible.loc[_idx] = 1.0
+            _n_ref_usados.loc[_idx] = float(_n_usado)
+            if _nivel_ref == "grado":
+                _conf.loc[_idx] = min(100.0, 100.0 * _n_usado / max(_min_n, 1))
+            elif _nivel_ref == "familia":
+                _conf.loc[_idx] = 70.0
+            else:
+                _conf.loc[_idx] = 40.0
+            _detalle_modelo.loc[_idx] = _detalle
         else:
-            _detalle_modelo.append("Estimado fuera de rango plausible")
+            # Última defensa: no dejar cortes si todo el histórico fue filtrado.
+            # Usa el máximo simple del dataset agrupado visible/disponible.
+            _max_simple = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
+            _max_simple = _max_simple[(_max_simple > 0.0) & (_max_simple < 40.0)]
+            if len(_max_simple) > 0:
+                _estimado.loc[_idx] = float(_max_simple.max())
+                _ideal_disponible.loc[_idx] = 1.0
+                _n_ref_usados.loc[_idx] = float(len(_max_simple))
+                _conf.loc[_idx] = 25.0
+                _detalle_modelo.loc[_idx] = "Fallback emergencia - máximo simple"
 
     df_agrup["Productividad_estimada"] = _estimado
     df_agrup["Rendimiento_esperado_producto"] = _estimado
-    df_agrup["Estimado_disponible_referencia"] = _estimado_disponible
-    df_agrup["Confiabilidad_benchmark_productividad"] = _estimado_disponible * 100.0
-    df_agrup["N_vecinos_benchmark_productividad"] = np.nan
-    df_agrup["Indicador_target_optimo_productividad"] = _estimado_disponible
+    df_agrup["Maximo_historico_validado_producto"] = _estimado
+    df_agrup["Estimado_disponible_referencia"] = _ideal_disponible
+    df_agrup["Detalle_estimado_referencia"] = _detalle_modelo
+    df_agrup["Confiabilidad_benchmark_productividad"] = _conf
+    df_agrup["N_vecinos_benchmark_productividad"] = _n_ref_usados
+    df_agrup["Indicador_target_optimo_productividad"] = _ideal_disponible
     df_agrup["Percentil_rendimiento_base"] = np.nan
-    df_agrup["Maximo_historico_validado_producto"] = np.nan
+    df_agrup["Target_operativo_producto"] = _estimado
 
     df_agrup["Desvio_vs_productividad_estimada"] = (
         pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
@@ -1916,62 +2078,34 @@ if unidad.startswith("Polimer") and all(
     df_agrup["Alerta_baja_actividad"] = np.where(_desvio_tmp <= -1.0, 1.0, 0.0)
     df_agrup.loc[_desvio_tmp.isna(), "Alerta_baja_actividad"] = np.nan
 
-    df_agrup["Gap_vs_target_operativo"] = (
-        pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
-        - pd.to_numeric(df_agrup["Target_operativo_producto"], errors="coerce")
-    )
-    df_agrup["Gap_vs_maximo_historico"] = np.nan
+    df_agrup["Gap_vs_target_operativo"] = _desvio_tmp
+    df_agrup["Gap_vs_maximo_historico"] = _desvio_tmp
 
     if "Presion_R2301" in df_agrup.columns:
-        _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
-        _presion_ok = (_presion > 30.0) & (_presion < 31.0)
-        df_agrup["Presion_operacion_OK"] = np.where(_presion_ok, 1.0, 0.0)
+        _presion_final = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
+        _presion_ok_final = (_presion_final > 30.0) & (_presion_final < 31.0)
+        df_agrup["Presion_operacion_OK"] = np.where(_presion_ok_final, 1.0, 0.0)
     else:
         df_agrup["Presion_operacion_OK"] = np.nan
 
-    df_agrup["Periodo_base_productividad_2024"] = _estimado_disponible
+    df_agrup["Periodo_base_productividad_2024"] = _ideal_disponible
 
     with sidebar_modelo:
-        st.markdown("---")
-        st.subheader("Modelo rendimiento estimado")
-        with st.expander("Correlación de referencia", expanded=False):
+        with st.expander("Resumen rendimiento ideal", expanded=False):
             st.caption(
-                "Correlación tomada de 'Curvas de productividad (2025 - 2026).xlsx' "
-                "→ hoja DATOS → columna V 'Estimado'. No usa cambio de lecho ni ajusta contra el real actual."
+                "Esta tabla muestra los máximos históricos validados que se usan como ideal. "
+                "No hay grados sin estimación: si falta referencia por grado, se usa fallback."
             )
-            st.code(
-                "K, XS 3-5: Est = 24.47 - 0.2198·Propano\n"
-                "K, XS 2-4: Est = 21.94394 - 0.20900·Propano - 0.011743·Slurry + 0.33498·MFI\n"
-                "L: Est = 26.838 - 0.3041·Propano\n"
-                "H: Est = 59.93305 - 0.16619·Propano - 0.60735·Slurry - 1.06518·MFI",
-                language="text",
-            )
-
-            _diag_corr = pd.DataFrame(
-                [
-                    {"Familia": "K", "Rango X-S": "3-5", "Intercepto": 24.47, "Propano": -0.2198, "Slurry": 0.0, "MFI": 0.0},
-                    {"Familia": "K", "Rango X-S": "2-4", "Intercepto": 21.943937610345401, "Propano": -0.20900191282896072, "Slurry": -0.011743057462415179, "MFI": 0.33497778099646869},
-                    {"Familia": "L", "Rango X-S": "*", "Intercepto": 26.838, "Propano": -0.3041, "Slurry": 0.0, "MFI": 0.0},
-                    {"Familia": "H", "Rango X-S": "*", "Intercepto": 59.933053369846832, "Propano": -0.16619206190972843, "Slurry": -0.60734925212800905, "MFI": -1.0651802506881705},
-                ]
-            )
-            st.dataframe(_diag_corr, width="stretch", hide_index=True)
 
             _total = len(df_agrup)
-            _ok = int(_estimado_disponible.sum())
-            st.metric("Puntos con estimado", f"{_ok:,} / {_total:,}")
+            _ok = int(_ideal_disponible.sum())
+            st.metric("Puntos con ideal", f"{_ok:,} / {_total:,}")
 
-            _familias_sin_corr = (
-                df_agrup.loc[_estimado_disponible <= 0.0, ["Producto_normalizado_referencia", "Grado_polvo_referencia", "Rango_XS_referencia"]]
-                .dropna(how="all")
-                .drop_duplicates()
-            )
-            if len(_familias_sin_corr) > 0:
-                st.warning(
-                    "Hay productos/familias sin correlación en la planilla de referencia. "
-                    "La app deja esos estimados en blanco para no inventar valores."
-                )
-                st.dataframe(_familias_sin_corr, width="stretch", hide_index=True)
+            if len(_filas_stats) > 0:
+                _stats_df = pd.DataFrame(_filas_stats).sort_values(["Nivel", "Grupo"])
+                st.dataframe(_stats_df.round(3), width="stretch", hide_index=True)
+            else:
+                st.warning("No quedaron puntos de referencia con los filtros actuales. Se usará fallback simple.")
 
 # Mascara inicial: rango de fechas
 mask = (

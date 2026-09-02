@@ -1,26 +1,46 @@
 # Streamlit - Tendencias Destilación / Polimerización
 
-Versión con **rendimiento estimado por correlación de referencia** tomada del archivo `Curvas de productividad (2025 - 2026).xlsx`.
+## Rendimiento ideal por máximo histórico validado
 
-## Criterio
+Se reemplazó la estimación basada en correlaciones incompletas por un criterio de **rendimiento ideal**.
 
-El rendimiento estimado queda alineado con la hoja `DATOS`, columna `V = Estimado` del Excel de referencia.
-
-No se usa Gradient Boosting ni vecinos históricos. Tampoco se ajusta contra el rendimiento real de la campaña actual.
+Criterio principal:
 
 ```text
-Desvío = Rendimiento real - Rendimiento estimado
+Rendimiento ideal = máximo histórico validado del grado producido correctamente
+Desvío = Rendimiento real - Rendimiento ideal
 ```
 
-## Correlaciones implementadas
+El cálculo usa el producto/grado normalizado de la app:
 
 ```text
-K, XS 3-5: Est = 24.47 - 0.2198·Propano
-K, XS 2-4: Est = 21.94394 - 0.20900·Propano - 0.011743·Slurry + 0.33498·MFI
-L:         Est = 26.838 - 0.3041·Propano
-H:         Est = 59.93305 - 0.16619·Propano - 0.60735·Slurry - 1.06518·MFI
+- agrupa transiciones TE con el grado base;
+- agrupa KFM como KFM6110;
+- compara cada punto contra el máximo validado de su propio grado.
 ```
 
-## Familias sin correlación
+Para evitar máximos falsos, antes de calcular el ideal se aplican filtros de operación normal cuando existen:
 
-La planilla de referencia no estima las familias `S`, `T`, `H KFM`, `H FFM` ni `T ZN389`. Para esos casos la app deja `Rendimiento estimado` en blanco, para no inventar una correlación no validada.
+```text
+30 < Presión R-2301 < 31
+60 < Nivel R-2301 < 70
+8000 < Calor reacción URA < 13000
+MFI polvo > 0
+Slurry > 50
+Rendimiento entre 0 y 40
+Exclusión opcional del evento de bajo nivel
+Filtro opcional de outliers por IQR
+```
+
+Si un grado tiene pocos puntos válidos, la app no deja la curva en blanco: usa fallback por familia/grupo y luego fallback global.
+
+Opciones disponibles en la barra lateral:
+
+```text
+Modelo rendimiento ideal → Rendimiento ideal histórico
+- Criterio de ideal: máximo validado / promedio top 3 / percentil 95
+- Mínimo puntos por grado
+- Excluir outliers IQR
+- Usar filtros de operación normal
+- Excluir evento bajo nivel reactor
+```
