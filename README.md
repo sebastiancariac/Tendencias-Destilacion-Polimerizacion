@@ -1,40 +1,33 @@
 # Streamlit - Tendencias Destilación / Polimerización
 
-Versión con interfaz limpia para rendimiento estimado.
+Versión corregida del modelo **Rendimiento estimado**.
 
-## Criterio visible
+## Criterio
 
-Se deja una sola variable visible para el usuario:
+El rendimiento estimado se calcula como promedio de antecedentes comparables en períodos OK, usando solamente variables del polvo/reactor:
 
-```text
-Rendimiento estimado
-```
+- concentración de propano;
+- concentración de H2;
+- caudal ZN-306 activo;
+- caudal ZN-389 activo;
+- producción de PP;
+- MFI del polvo;
+- XS.
 
-Las columnas auxiliares del modelo quedan internas y no aparecen en el selector de variables.
+No usa producto/grado pellet como variable de cálculo.
 
-## Estimación
+## Corrección KFM / ZN-389
 
-El rendimiento estimado se calcula como promedio de antecedentes comparables en períodos OK usando solo variables de polvo/reactor:
+La versión anterior subestimaba KFM porque la base de comparación no estaba separando correctamente el modo de catalizador y podía mezclar referencias ZN-306 con ZN-389.
 
-```text
-Concentración de propano
-Concentración de H2
-Caudal de catalizador activo
-Producción de PP
-MFI del polvo
-XS
-```
+Ahora:
 
-No se usa producto/grado pellet. No se usa máximo histórico.
+- se incluye por defecto abril-mayo 2026 como período OK para condición ZN-389/KFM;
+- se compara ZN-389 contra ZN-389 y ZN-306 contra ZN-306, siempre que existan suficientes puntos;
+- el usuario puede editar los períodos OK desde la barra lateral.
 
-## Diagnóstico interno
+## Períodos OK default
 
-La app conserva un diagnóstico en el panel del modelo para revisar:
-
-```text
-Puntos visibles con estimado
-Variables críticas usadas
-Promedio estimado
-Rango estimado
-Desvío promedio visible
-```
+- abril 2025;
+- noviembre-diciembre 2025;
+- abril-mayo 2026 para ZN-389/KFM.
