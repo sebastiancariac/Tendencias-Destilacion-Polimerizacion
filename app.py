@@ -1187,13 +1187,13 @@ if unidad.startswith("Polimer") and all(
     # Las variables auxiliares del modelo de target se calculan internamente,
     # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
-        "Productividad_estimada": "Rendimiento ideal [máximo validado]",
-        "Detalle_estimado_referencia": "Detalle rendimiento ideal",
-        "Estimado_disponible_referencia": "Ideal disponible [0/1]",
-        "Desvio_vs_productividad_estimada": "Desvío vs rendimiento ideal [Real - Ideal]",
-        "Indice_actividad_vs_estimado": "Índice actividad vs ideal [Real / Ideal]",
+        "Productividad_estimada": "Rendimiento estimado [polvo/reactor]",
+        "Detalle_estimado_referencia": "Detalle rendimiento estimado",
+        "Estimado_disponible_referencia": "Estimado disponible [0/1]",
+        "Desvio_vs_productividad_estimada": "Desvío vs rendimiento estimado [Real - Estimado]",
+        "Indice_actividad_vs_estimado": "Índice actividad vs estimado [Real / Estimado]",
         "Alerta_baja_actividad": "Alerta baja actividad [1 = revisar]",
-        "Confiabilidad_benchmark_productividad": "Confiabilidad rendimiento ideal [%]",
+        "Confiabilidad_benchmark_productividad": "Confiabilidad rendimiento estimado [%]",
     }
 
     for var_prod, label_prod in variables_productividad.items():
@@ -1738,18 +1738,18 @@ filtro_producto_activo = unidad.startswith("Polimer") and len(productos_sel) > 0
 df_agrup = aplicar_agrupacion(df, agrupacion)
 
 
-# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO IDEAL
+# AJUSTE FINAL POST-AGRUPACION RENDIMIENTO ESTIMADO - POLVO/REACTOR
 # ==============================================================================
-# Criterio corregido:
-# - Para diagnóstico de lechos/contaminantes no conviene que el estimado quede en blanco.
-# - Tampoco conviene forzar una correlación no confiable para familias sin fórmula validada.
-# - Se define entonces un "Rendimiento ideal" como el máximo histórico VALIDADO
-#   alcanzado para el grado producido correctamente.
-# - La comparación principal pasa a ser:
-#       Desvío = Rendimiento real - Rendimiento ideal
-#
-# El máximo se calcula después de limpiar outliers y aplicar filtros de operación normal.
-# Si un grado no tiene suficientes puntos, se usa fallback por grupo/familia y luego global.
+# Criterio corregido solicitado:
+# - NO se usa Producto / Grado pellet para estimar rendimiento.
+# - La estimación se basa únicamente en variables críticas del polvo y del reactor:
+#     concentración de propano, concentración de H2, caudal de catalizador,
+#     producción de PP, MFI del polvo y XS.
+# - El catalizador activo se calcula con la presión de descarga de las bombas:
+#     P-2209B = ZN-306; P-2209A = ZN-389.
+# - El estimado representa un rendimiento esperable/ideal comparable para esas
+#   condiciones de operación, calculado desde mejores antecedentes comparables.
+# - El desvío Real - Estimado queda como señal de pérdida de actividad.
 
 if unidad.startswith("Polimer") and all(
     col in df_agrup.columns
@@ -1762,393 +1762,415 @@ if unidad.startswith("Polimer") and all(
     _fecha = pd.to_datetime(df_agrup["Fecha_y_hora"], errors="coerce")
     _rendimiento = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
 
+    # ----------------------------------------------------------------------
+    # Catalizador activo en df_agrup.
+    # Se recalcula acá por seguridad para no depender del bloque previo.
+    # ----------------------------------------------------------------------
+    if all(c in df_agrup.columns for c in ["Catalizador_A", "Catalizador_B", "Presion_cat_2209A", "Presion_cat_2209B"]):
+        _cat_a = pd.to_numeric(df_agrup["Catalizador_A"], errors="coerce")
+        _cat_b = pd.to_numeric(df_agrup["Catalizador_B"], errors="coerce")
+        _p_cat_a = pd.to_numeric(df_agrup["Presion_cat_2209A"], errors="coerce")
+        _p_cat_b = pd.to_numeric(df_agrup["Presion_cat_2209B"], errors="coerce")
+
+        _zn306_activo = _p_cat_b >= 30.0
+        _zn389_activo = _p_cat_a >= 30.0
+
+        df_agrup["Caudal_ZN306_activo"] = np.where(_zn306_activo, _cat_b, 0.0)
+        df_agrup["Caudal_ZN389_activo"] = np.where(_zn389_activo, _cat_a, 0.0)
+        df_agrup["Caudal_catalizador_activo"] = (
+            pd.to_numeric(df_agrup["Caudal_ZN306_activo"], errors="coerce")
+            + pd.to_numeric(df_agrup["Caudal_ZN389_activo"], errors="coerce")
+        )
+        df_agrup.loc[df_agrup["Caudal_catalizador_activo"] <= 0, "Caudal_catalizador_activo"] = np.nan
+
+        _cat_activo = pd.to_numeric(df_agrup["Caudal_catalizador_activo"], errors="coerce")
+        df_agrup["Fraccion_ZN389_activo"] = (
+            pd.to_numeric(df_agrup["Caudal_ZN389_activo"], errors="coerce") / _cat_activo
+        ).replace([np.inf, -np.inf], np.nan)
+        df_agrup["Indicador_ZN389_activo"] = np.where(
+            pd.to_numeric(df_agrup["Fraccion_ZN389_activo"], errors="coerce") >= 0.5,
+            1.0,
+            0.0,
+        )
+    elif "Caudal_catalizador_activo" not in df_agrup.columns:
+        df_agrup["Caudal_catalizador_activo"] = np.nan
+        df_agrup["Indicador_ZN389_activo"] = np.nan
+
+    # ----------------------------------------------------------------------
+    # Controles del modelo
+    # ----------------------------------------------------------------------
     with sidebar_modelo:
         st.markdown("---")
-        st.subheader("Modelo rendimiento ideal")
-        with st.expander("Rendimiento ideal histórico", expanded=False):
+        st.subheader("Modelo rendimiento estimado")
+        with st.expander("Estimación por polvo/reactor", expanded=False):
             st.caption(
-                "El ideal se calcula como máximo histórico validado del grado, "
-                "con outliers y períodos no confiables excluidos. "
-                "Sirve para medir qué tan lejos estamos del mejor rendimiento alcanzado."
+                "No usa Producto/Grado pellet. Compara cada punto contra antecedentes "
+                "con condiciones similares de polvo y reactor."
             )
 
-            _criterio_ideal = st.selectbox(
-                "Criterio de ideal",
+            _criterio_estimado = st.selectbox(
+                "Criterio de estimación",
                 options=[
-                    "Máximo validado por grado",
-                    "Promedio top 3 por grado",
-                    "Percentil 95 por grado",
+                    "Promedio top comparables",
+                    "Percentil 90 comparables",
+                    "Máximo comparable",
                 ],
                 index=0,
-                key="criterio_rendimiento_ideal",
+                key="criterio_estimado_polvo_reactor",
                 help=(
-                    "Máximo validado usa el mayor rendimiento después de filtrar outliers. "
-                    "Promedio top 3 suaviza un poco. Percentil 95 es más conservador."
+                    "Promedio top comparables es el recomendado: toma los mejores puntos históricos "
+                    "entre condiciones similares, pero evita que un único outlier defina el estimado."
                 ),
             )
 
-            c_ideal_1, c_ideal_2 = st.columns(2)
-            with c_ideal_1:
-                _min_puntos_grado_ideal = st.number_input(
-                    "Mín. puntos por grado",
-                    min_value=2,
-                    max_value=30,
-                    value=4,
+            c_mod_1, c_mod_2 = st.columns(2)
+            with c_mod_1:
+                _n_vecinos_min = st.number_input(
+                    "Mín. comparables",
+                    min_value=5,
+                    max_value=150,
+                    value=25,
+                    step=5,
+                    key="min_comparables_polvo_reactor",
+                )
+            with c_mod_2:
+                _n_top_promedio = st.number_input(
+                    "Top para promedio",
+                    min_value=1,
+                    max_value=20,
+                    value=5,
                     step=1,
-                    key="min_puntos_grado_ideal",
-                    help="Si un grado tiene menos puntos válidos, se usa fallback por grupo o global.",
-                )
-            with c_ideal_2:
-                _usar_filtro_iqr_ideal = st.checkbox(
-                    "Excluir outliers IQR",
-                    value=True,
-                    key="usar_filtro_iqr_ideal",
-                    help="Quita puntos extremos antes de calcular el máximo validado.",
+                    key="top_promedio_polvo_reactor",
+                    help="Cantidad de mejores puntos comparables usados para el promedio top.",
                 )
 
-            _usar_filtros_operacion_ideal = st.checkbox(
-                "Usar filtros de operación normal",
-                value=True,
-                key="usar_filtros_operacion_ideal",
+            c_mod_3, c_mod_4 = st.columns(2)
+            with c_mod_3:
+                _distancia_max = st.number_input(
+                    "Distancia comparable",
+                    min_value=0.5,
+                    max_value=8.0,
+                    value=2.5,
+                    step=0.25,
+                    format="%.2f",
+                    key="distancia_comparable_polvo_reactor",
+                    help="Menor valor = exige condiciones más parecidas. Si hay pocos puntos, usa los más cercanos.",
+                )
+            with c_mod_4:
+                _dias_exclusion_local = st.number_input(
+                    "Excluir ± días",
+                    min_value=0,
+                    max_value=45,
+                    value=7,
+                    step=1,
+                    key="dias_exclusion_local_polvo_reactor",
+                    help="Evita usar puntos demasiado cercanos en el tiempo para estimar el mismo evento.",
+                )
+
+            _solo_historico_anterior = st.checkbox(
+                "Usar solo histórico anterior a cada punto",
+                value=False,
+                key="solo_historico_anterior_polvo_reactor",
                 help=(
-                    "Aplica filtros típicos de reactor: presión 30-31, nivel 60-70, "
-                    "URA 8000-13000, MFI > 0, slurry > 50, cuando esas variables existan."
+                    "Si se activa, no usa datos futuros para estimar. Para análisis histórico puede dejarse desactivado."
                 ),
             )
 
-            _excluir_evento_bajo_nivel_ideal = st.checkbox(
-                "Excluir evento bajo nivel reactor",
+            _usar_filtros_operacion = st.checkbox(
+                "Filtrar base por operación normal",
                 value=True,
-                key="excluir_evento_bajo_nivel_ideal",
-                help="Excluye el período histórico con productividad afectada por bajo nivel no detectado.",
+                key="filtros_operacion_modelo_polvo_reactor",
+                help=(
+                    "Usa presión/nivel/URA como filtros de calidad de datos, pero NO como variables del modelo."
+                ),
             )
 
-            c_exc_ideal_1, c_exc_ideal_2 = st.columns(2)
-            with c_exc_ideal_1:
-                _inicio_evento_bajo_nivel_ideal = st.date_input(
-                    "Inicio evento",
+            _usar_outliers = st.checkbox(
+                "Desestimar outliers severos",
+                value=True,
+                key="outliers_modelo_polvo_reactor",
+                help="Filtra puntos extremos de rendimiento antes de armar la referencia histórica.",
+            )
+
+            c_exc_1, c_exc_2 = st.columns(2)
+            with c_exc_1:
+                _inicio_evento_bajo_nivel = st.date_input(
+                    "Excluir desde",
                     value=pd.Timestamp("2024-11-01").date(),
-                    key="inicio_evento_bajo_nivel_ideal",
+                    key="inicio_excluir_modelo_polvo_reactor",
                 )
-            with c_exc_ideal_2:
-                _fin_evento_bajo_nivel_ideal = st.date_input(
-                    "Fin evento",
+            with c_exc_2:
+                _fin_evento_bajo_nivel = st.date_input(
+                    "Excluir hasta",
                     value=pd.Timestamp("2025-03-31").date(),
-                    key="fin_evento_bajo_nivel_ideal",
-                    help="Marzo 2025 por defecto para dejar abril 2025 dentro del histórico válido.",
+                    key="fin_excluir_modelo_polvo_reactor",
                 )
 
             st.info(
-                "Interpretación: Real - Ideal negativo y sostenido = pérdida frente al máximo histórico del grado. "
-                "Esto puede orientar revisión de contaminantes, actividad catalítica o cambio de lechos."
+                "Variables usadas: propano, H2, caudal catalizador activo, producción PP, MFI polvo y XS. "
+                "Producto/Grado pellet no participa del cálculo."
             )
 
-    def _familia_fallback_producto(_prod):
-        if _prod is None or pd.isna(_prod):
-            return pd.NA
-        txt = str(_prod).upper().strip()
-        if not txt:
-            return pd.NA
-        if "KFM" in txt:
-            return "KFM"
-        if re.search(r"6200T|6279T|\bT$", txt):
-            return "T"
-        if txt.startswith("SMD") or re.search(r"6200$", txt):
-            return "S"
-        if txt.startswith("LYD"):
-            return "L"
-        if txt.startswith("HYS"):
-            return "H"
-        # Para los grados K habituales: RFD, KYD, XSD/WSD con sufijo K, KED/RFM.
-        if txt.startswith(("RFD", "KYD", "KED", "RFM")) or txt.endswith("K"):
-            return "K"
-        # Fallback genérico: prefijo alfabético inicial.
-        m = re.match(r"([A-Z]+)", txt)
-        return m.group(1) if m else pd.NA
+    # ----------------------------------------------------------------------
+    # Variables usadas EXACTAMENTE para la estimación solicitada.
+    # ----------------------------------------------------------------------
+    _features_def = [
+        ("Conc_propano", "Concentración propano", 3.0),
+        ("Conc_H2", "Concentración H2", 3.0),
+        ("Caudal_catalizador_activo", "Caudal catalizador activo", 4.0),
+        ("Produccion_PP", "Producción PP", 2.5),
+        ("MFI_polvo", "MFI polvo", 4.0),
+        ("XS", "XS", 3.0),
+    ]
 
-    def _maximo_validado_serie(_serie, criterio, usar_iqr=True):
-        y = pd.to_numeric(_serie, errors="coerce").dropna()
-        y = y[(y > 0.0) & (y < 40.0)]
-        if len(y) == 0:
-            return np.nan, 0, np.nan, np.nan, np.nan
+    _features = [f for f, _, _ in _features_def if f in df_agrup.columns]
+    _pesos = np.array([w for f, _, w in _features_def if f in df_agrup.columns], dtype=float)
+    _n_features = len(_features)
 
-        y_original = y.copy()
-        if usar_iqr and len(y) >= 6:
-            q1 = float(y.quantile(0.25))
-            q3 = float(y.quantile(0.75))
-            iqr = q3 - q1
-            if np.isfinite(iqr) and iqr > 0:
-                lim_inf = q1 - 1.5 * iqr
-                lim_sup = q3 + 1.5 * iqr
-                y_filtrada = y[(y >= lim_inf) & (y <= lim_sup)]
-                if len(y_filtrada) >= max(3, int(len(y) * 0.50)):
-                    y = y_filtrada
+    _estimado = pd.Series(np.nan, index=df_agrup.index, dtype=float)
+    _estimado_ok = pd.Series(0.0, index=df_agrup.index, dtype=float)
+    _detalle_modelo = pd.Series("Sin estimado", index=df_agrup.index, dtype="string")
+    _conf = pd.Series(np.nan, index=df_agrup.index, dtype=float)
+    _n_ref_usados = pd.Series(np.nan, index=df_agrup.index, dtype=float)
+    _dist_media = pd.Series(np.nan, index=df_agrup.index, dtype=float)
 
-        if len(y) == 0:
-            y = y_original
+    _filas_diag = []
 
-        if criterio.startswith("Promedio top 3"):
-            ideal = float(y.sort_values(ascending=False).head(min(3, len(y))).mean())
-        elif criterio.startswith("Percentil 95"):
-            ideal = float(y.quantile(0.95))
-        else:
-            ideal = float(y.max())
+    if _n_features >= 4:
+        _x = df_agrup[_features].copy()
+        for _f in _features:
+            _x[_f] = pd.to_numeric(_x[_f], errors="coerce")
 
-        return ideal, int(len(y)), float(y.median()), float(y.quantile(0.95)), float(y.max())
+        _base_mask = (
+            _fecha.notna()
+            & _rendimiento.notna()
+            & (_rendimiento > 5.0)
+            & (_rendimiento < 40.0)
+        )
 
-    if "Producto" in df_agrup.columns:
-        _producto_norm = df_agrup["Producto"].map(normalizar_producto_operativo).astype("string")
-    else:
-        _producto_norm = pd.Series(pd.NA, index=df_agrup.index, dtype="string")
+        # Filtros físicos mínimos de las variables explícitas.
+        if "Conc_propano" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Conc_propano"], errors="coerce") > 0.0)
+        if "Conc_H2" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Conc_H2"], errors="coerce") > 0.0)
+        if "Caudal_catalizador_activo" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Caudal_catalizador_activo"], errors="coerce") > 0.0)
+        if "Produccion_PP" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["Produccion_PP"], errors="coerce") > 0.0)
+        if "MFI_polvo" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce") > 0.0)
+        if "XS" in _features:
+            _base_mask = _base_mask & (pd.to_numeric(df_agrup["XS"], errors="coerce") >= 0.0)
 
-    _familia_fallback = _producto_norm.map(_familia_fallback_producto).astype("string")
+        # Filtros de operación normal: solo limpian la base histórica; no son variables de estimación.
+        if bool(_usar_filtros_operacion):
+            if "Presion_R2301" in df_agrup.columns:
+                _p_r = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
+                _base_mask = _base_mask & (_p_r > 30.0) & (_p_r < 31.0)
+            if "Nivel_R2301" in df_agrup.columns:
+                _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
+                _base_mask = _base_mask & (_nivel > 60.0) & (_nivel < 70.0)
+            if "Calor_reaccion_URA" in df_agrup.columns:
+                _ura = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
+                _base_mask = _base_mask & (_ura > 8000.0) & (_ura < 13000.0)
 
-    df_agrup["Producto_normalizado_referencia"] = _producto_norm
-    df_agrup["Familia_productividad_codigo"] = _familia_fallback
-    df_agrup["Grado_polvo_referencia"] = _familia_fallback
-    df_agrup["Rango_XS_referencia"] = pd.NA
-
-    _mask_ref = (
-        _fecha.notna()
-        & _rendimiento.notna()
-        & _producto_norm.notna()
-        & (_rendimiento > 0.0)
-        & (_rendimiento < 40.0)
-    )
-
-    if bool(_usar_filtros_operacion_ideal):
-        if "Presion_R2301" in df_agrup.columns:
-            _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
-            _mask_ref = _mask_ref & (_presion > 30.0) & (_presion < 31.0)
-        else:
-            _presion = pd.Series(np.nan, index=df_agrup.index)
-
-        if "Nivel_R2301" in df_agrup.columns:
-            _nivel = pd.to_numeric(df_agrup["Nivel_R2301"], errors="coerce")
-            _mask_ref = _mask_ref & (_nivel > 60.0) & (_nivel < 70.0)
-
-        if "Calor_reaccion_URA" in df_agrup.columns:
-            _ura = pd.to_numeric(df_agrup["Calor_reaccion_URA"], errors="coerce")
-            _mask_ref = _mask_ref & (_ura > 8000.0) & (_ura < 13000.0)
-
-        if "MFI_polvo" in df_agrup.columns:
-            _mfi = pd.to_numeric(df_agrup["MFI_polvo"], errors="coerce")
-            _mask_ref = _mask_ref & (_mfi > 0.0)
-
-        if "Slurry" in df_agrup.columns:
-            _slurry = pd.to_numeric(df_agrup["Slurry"], errors="coerce")
-            _mask_ref = _mask_ref & (_slurry > 50.0)
-    else:
-        if "Presion_R2301" in df_agrup.columns:
-            _presion = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
-        else:
-            _presion = pd.Series(np.nan, index=df_agrup.index)
-
-    if bool(_excluir_evento_bajo_nivel_ideal):
+        # Exclusión del evento de bajo nivel/no confiable.
         _evento_bajo_nivel = (
-            (_fecha >= pd.Timestamp(_inicio_evento_bajo_nivel_ideal))
+            (_fecha >= pd.Timestamp(_inicio_evento_bajo_nivel))
             & (
                 _fecha
-                <= pd.Timestamp(_fin_evento_bajo_nivel_ideal)
+                <= pd.Timestamp(_fin_evento_bajo_nivel)
                 + pd.Timedelta(days=1)
                 - pd.Timedelta(seconds=1)
             )
         )
-        _mask_ref = _mask_ref & (~_evento_bajo_nivel)
+        _base_mask = _base_mask & (~_evento_bajo_nivel)
 
-    _ref = pd.DataFrame(
-        {
-            "Producto": _producto_norm,
-            "Familia": _familia_fallback,
-            "Rendimiento": _rendimiento,
-            "Fecha_y_hora": _fecha,
-        },
-        index=df_agrup.index,
-    ).loc[_mask_ref].copy()
+        # Outliers severos de rendimiento.
+        if bool(_usar_outliers) and int(_base_mask.sum()) >= 20:
+            _y_base_tmp = _rendimiento.loc[_base_mask].dropna()
+            _q1 = float(_y_base_tmp.quantile(0.25))
+            _q3 = float(_y_base_tmp.quantile(0.75))
+            _iqr = _q3 - _q1
+            if np.isfinite(_iqr) and _iqr > 0:
+                _lim_inf = _q1 - 2.0 * _iqr
+                _lim_sup = _q3 + 2.0 * _iqr
+                _base_mask = _base_mask & (_rendimiento >= _lim_inf) & (_rendimiento <= _lim_sup)
 
-    _stats_producto = {}
-    _stats_familia = {}
-    _filas_stats = []
+        # Requerir una cantidad mínima de variables críticas presentes.
+        _min_features_validas = max(4, int(np.ceil(_n_features * 0.75)))
+        _features_validas_por_fila = _x.notna().sum(axis=1)
+        _base_mask = _base_mask & (_features_validas_por_fila >= _min_features_validas)
 
-    for _prod, _grp in _ref.groupby("Producto", dropna=True):
-        _ideal, _n, _med, _p95, _max = _maximo_validado_serie(
-            _grp["Rendimiento"],
-            _criterio_ideal,
-            bool(_usar_filtro_iqr_ideal),
-        )
-        if np.isfinite(_ideal):
-            _stats_producto[str(_prod)] = {
-                "ideal": _ideal,
-                "n": _n,
-                "mediana": _med,
-                "p95": _p95,
-                "max": _max,
-            }
-            _filas_stats.append(
-                {
-                    "Nivel": "Grado",
-                    "Grupo": str(_prod),
-                    "Ideal": _ideal,
-                    "n_validos": _n,
-                    "Mediana": _med,
-                    "P95": _p95,
-                    "Max": _max,
-                }
-            )
+        _idx_ref_total = df_agrup.index[_base_mask]
+        _n_ref_total = int(len(_idx_ref_total))
 
-    for _fam, _grp in _ref.groupby("Familia", dropna=True):
-        _ideal, _n, _med, _p95, _max = _maximo_validado_serie(
-            _grp["Rendimiento"],
-            _criterio_ideal,
-            bool(_usar_filtro_iqr_ideal),
-        )
-        if np.isfinite(_ideal):
-            _stats_familia[str(_fam)] = {
-                "ideal": _ideal,
-                "n": _n,
-                "mediana": _med,
-                "p95": _p95,
-                "max": _max,
-            }
-            _filas_stats.append(
-                {
-                    "Nivel": "Familia fallback",
-                    "Grupo": str(_fam),
-                    "Ideal": _ideal,
-                    "n_validos": _n,
-                    "Mediana": _med,
-                    "P95": _p95,
-                    "Max": _max,
-                }
-            )
+        if _n_ref_total > 0:
+            _x_ref_total = _x.loc[_idx_ref_total, _features].astype(float)
+            _y_ref_total = _rendimiento.loc[_idx_ref_total].astype(float)
+            _fecha_ref_total = _fecha.loc[_idx_ref_total]
 
-    _ideal_global, _n_global, _med_global, _p95_global, _max_global = _maximo_validado_serie(
-        _ref["Rendimiento"] if len(_ref) else pd.Series(dtype=float),
-        _criterio_ideal,
-        bool(_usar_filtro_iqr_ideal),
-    )
+            # Escalas robustas por variable para calcular distancia comparable.
+            _medianas = _x_ref_total.median(numeric_only=True)
+            _q25 = _x_ref_total.quantile(0.25)
+            _q75 = _x_ref_total.quantile(0.75)
+            _iqr_x = (_q75 - _q25).replace(0, np.nan)
+            _std_x = _x_ref_total.std(numeric_only=True).replace(0, np.nan)
+            _escala = _iqr_x.fillna(_std_x).fillna(1.0)
+            _escala = _escala.replace(0, 1.0)
 
-    # Piso de consistencia: si lo llamamos "máximo histórico", no puede quedar por debajo
-    # de un rendimiento real observado para el mismo grado dentro del dataset disponible.
-    # Este piso usa solo limpieza mínima física, no IQR ni filtros de operación normal,
-    # porque esos filtros podían dejar afuera el propio valor máximo y generar una curva
-    # de "máximo" menor que el real.
-    _mask_obs_max = (
-        _rendimiento.notna()
-        & _producto_norm.notna()
-        & (_rendimiento > 0.0)
-        & (_rendimiento < 40.0)
-    )
+            # Pre-imputación robusta para poder comparar filas con alguna medición faltante.
+            _x_ref_imp_total = _x_ref_total.fillna(_medianas)
+            _x_all_imp = _x[_features].astype(float).fillna(_medianas)
 
-    _max_observado_producto = {}
-    _n_observado_producto = {}
-    _max_observado_familia = {}
-    _n_observado_familia = {}
+            # Calcular solo el rango visible para no volver lenta la app.
+            _desde_dt_modelo = pd.Timestamp(desde)
+            _hasta_dt_modelo = pd.Timestamp(hasta) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            _mask_pred = (_fecha >= _desde_dt_modelo) & (_fecha <= _hasta_dt_modelo) & _fecha.notna()
+            _idx_pred = list(df_agrup.index[_mask_pred])
 
-    try:
-        _obs_df = pd.DataFrame(
-            {
-                "Producto": _producto_norm,
-                "Familia": _familia_fallback,
-                "Rendimiento": _rendimiento,
-            },
-            index=df_agrup.index,
-        ).loc[_mask_obs_max].copy()
+            _pesos_series = pd.Series(_pesos, index=_features, dtype=float)
 
-        if len(_obs_df) > 0:
-            _max_observado_producto = _obs_df.groupby("Producto")["Rendimiento"].max().astype(float).to_dict()
-            _n_observado_producto = _obs_df.groupby("Producto")["Rendimiento"].count().astype(int).to_dict()
-            _max_observado_familia = _obs_df.groupby("Familia")["Rendimiento"].max().astype(float).to_dict()
-            _n_observado_familia = _obs_df.groupby("Familia")["Rendimiento"].count().astype(int).to_dict()
-    except Exception:
-        pass
+            for _idx in _idx_pred:
+                try:
+                    _fila_original = _x.loc[_idx, _features]
+                    _n_feat_fila = int(_fila_original.notna().sum())
+                    if _n_feat_fila < _min_features_validas:
+                        _detalle_modelo.loc[_idx] = "Fallback: faltan variables críticas"
+                        continue
 
-    _estimado = pd.Series(np.nan, index=df_agrup.index, dtype=float)
-    _ideal_disponible = pd.Series(0.0, index=df_agrup.index, dtype=float)
-    _detalle_modelo = pd.Series("Sin producto", index=df_agrup.index, dtype="string")
-    _conf = pd.Series(np.nan, index=df_agrup.index, dtype=float)
-    _n_ref_usados = pd.Series(np.nan, index=df_agrup.index, dtype=float)
+                    _fecha_i = _fecha.loc[_idx]
+                    _ref_mask_local = pd.Series(True, index=_idx_ref_total)
 
-    _min_n = int(_min_puntos_grado_ideal)
+                    # No usar el mismo punto ni una vecindad temporal demasiado cercana.
+                    if pd.notna(_fecha_i) and int(_dias_exclusion_local) > 0:
+                        _ref_mask_local = _ref_mask_local & (
+                            (_fecha_ref_total < (_fecha_i - pd.Timedelta(days=int(_dias_exclusion_local))))
+                            | (_fecha_ref_total > (_fecha_i + pd.Timedelta(days=int(_dias_exclusion_local))))
+                        )
 
-    for _idx in df_agrup.index:
-        _prod = _producto_norm.loc[_idx]
-        _fam = _familia_fallback.loc[_idx]
+                    if bool(_solo_historico_anterior) and pd.notna(_fecha_i):
+                        _ref_mask_local = _ref_mask_local & (_fecha_ref_total < _fecha_i)
 
-        _ideal = np.nan
-        _n_usado = 0
-        _detalle = "Sin referencia"
-        _nivel_ref = ""
+                    _idx_ref = list(_idx_ref_total[_ref_mask_local.to_numpy(dtype=bool)])
+                    if len(_idx_ref) < max(5, int(_n_vecinos_min)):
+                        # Si la exclusión temporal dejó muy pocos puntos, relajar solo esa exclusión.
+                        _idx_ref = list(_idx_ref_total)
 
-        if not pd.isna(_prod) and str(_prod) in _stats_producto and _stats_producto[str(_prod)]["n"] >= _min_n:
-            _stat = _stats_producto[str(_prod)]
-            _ideal = _stat["ideal"]
-            _n_usado = _stat["n"]
-            _detalle = "OK - máximo validado por grado"
-            _nivel_ref = "grado"
-        elif not pd.isna(_fam) and str(_fam) in _stats_familia and _stats_familia[str(_fam)]["n"] >= _min_n:
-            _stat = _stats_familia[str(_fam)]
-            _ideal = _stat["ideal"]
-            _n_usado = _stat["n"]
-            _detalle = "Fallback - máximo validado por familia/grupo"
-            _nivel_ref = "familia"
-        elif np.isfinite(_ideal_global):
-            _ideal = _ideal_global
-            _n_usado = _n_global
-            _detalle = "Fallback - máximo validado global"
-            _nivel_ref = "global"
+                    if len(_idx_ref) == 0:
+                        _detalle_modelo.loc[_idx] = "Sin base histórica válida"
+                        continue
 
-        if np.isfinite(_ideal):
-            _ideal_original = float(_ideal)
+                    _x_ref_imp = _x_ref_imp_total.loc[_idx_ref, _features]
+                    _y_ref = _y_ref_total.loc[_idx_ref]
 
-            # Garantía de consistencia para el máximo histórico:
-            # por grado primero; si no hay, por familia; si no hay, queda el ideal calculado.
-            _piso_obs = np.nan
-            _n_obs = 0
-            if not pd.isna(_prod) and str(_prod) in _max_observado_producto:
-                _piso_obs = float(_max_observado_producto[str(_prod)])
-                _n_obs = int(_n_observado_producto.get(str(_prod), 0))
-            elif not pd.isna(_fam) and str(_fam) in _max_observado_familia:
-                _piso_obs = float(_max_observado_familia[str(_fam)])
-                _n_obs = int(_n_observado_familia.get(str(_fam), 0))
+                    _fila_imp = _x_all_imp.loc[_idx, _features]
+                    _diff = (_x_ref_imp - _fila_imp) / _escala
+                    _dist = np.sqrt(((_diff ** 2) * _pesos_series).sum(axis=1) / _pesos_series.sum())
+                    _dist = pd.to_numeric(_dist, errors="coerce").replace([np.inf, -np.inf], np.nan)
 
-            if np.isfinite(_piso_obs) and _piso_obs > _ideal:
-                _ideal = _piso_obs
-                _detalle = _detalle + " + piso máximo observado"
-                _n_usado = max(int(_n_usado), int(_n_obs))
+                    _dist_valid = _dist.dropna()
+                    if len(_dist_valid) == 0:
+                        _detalle_modelo.loc[_idx] = "Sin distancia comparable"
+                        continue
 
-            _estimado.loc[_idx] = float(_ideal)
-            _ideal_disponible.loc[_idx] = 1.0
-            _n_ref_usados.loc[_idx] = float(_n_usado)
-            if _nivel_ref == "grado":
-                _conf.loc[_idx] = min(100.0, 100.0 * _n_usado / max(_min_n, 1))
-            elif _nivel_ref == "familia":
-                _conf.loc[_idx] = 70.0
-            else:
-                _conf.loc[_idx] = 40.0
-            _detalle_modelo.loc[_idx] = _detalle
-        else:
-            # Última defensa: no dejar cortes si todo el histórico fue filtrado.
-            # Usa el máximo simple del dataset agrupado visible/disponible.
-            _max_simple = pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
-            _max_simple = _max_simple[(_max_simple > 0.0) & (_max_simple < 40.0)]
-            if len(_max_simple) > 0:
-                _estimado.loc[_idx] = float(_max_simple.max())
-                _ideal_disponible.loc[_idx] = 1.0
-                _n_ref_usados.loc[_idx] = float(len(_max_simple))
-                _conf.loc[_idx] = 25.0
-                _detalle_modelo.loc[_idx] = "Fallback emergencia - máximo simple"
+                    _candidatos = _dist_valid[_dist_valid <= float(_distancia_max)].sort_values()
+                    if len(_candidatos) < int(_n_vecinos_min):
+                        _candidatos = _dist_valid.sort_values().head(min(int(_n_vecinos_min), len(_dist_valid)))
+                    else:
+                        # Limitar para que no se diluya con puntos demasiado lejanos.
+                        _candidatos = _candidatos.head(max(int(_n_vecinos_min), 80))
+
+                    _y_comp = _y_ref.loc[_candidatos.index].dropna()
+                    if len(_y_comp) == 0:
+                        _detalle_modelo.loc[_idx] = "Sin rendimiento comparable"
+                        continue
+
+                    if _criterio_estimado.startswith("Máximo"):
+                        _est = float(_y_comp.max())
+                    elif _criterio_estimado.startswith("Percentil"):
+                        _est = float(_y_comp.quantile(0.90))
+                    else:
+                        _top = _y_comp.sort_values(ascending=False).head(min(int(_n_top_promedio), len(_y_comp)))
+                        _est = float(_top.mean())
+
+                    if np.isfinite(_est):
+                        _estimado.loc[_idx] = _est
+                        _estimado_ok.loc[_idx] = 1.0
+                        _n_ref_usados.loc[_idx] = float(len(_y_comp))
+                        _dist_media.loc[_idx] = float(_candidatos.mean())
+
+                        # Confianza: más vecinos y menor distancia = más confianza.
+                        _conf_n = min(100.0, 100.0 * len(_y_comp) / max(float(_n_vecinos_min), 1.0))
+                        _conf_d = max(0.0, 100.0 * (1.0 - min(float(_candidatos.mean()) / max(float(_distancia_max), 0.01), 1.0)))
+                        _conf.loc[_idx] = 0.60 * _conf_n + 0.40 * _conf_d
+                        _detalle_modelo.loc[_idx] = (
+                            f"OK: {_criterio_estimado}; n={len(_y_comp)}; dist={float(_candidatos.mean()):.2f}"
+                        )
+                except Exception as _exc_est:
+                    _detalle_modelo.loc[_idx] = f"Error estimación: {_exc_est}"
+
+            # Fallback global para evitar cortes cuando falte alguna variable crítica.
+            _y_global = _y_ref_total.dropna()
+            if len(_y_global) > 0:
+                if _criterio_estimado.startswith("Máximo"):
+                    _fallback_global = float(_y_global.max())
+                elif _criterio_estimado.startswith("Percentil"):
+                    _fallback_global = float(_y_global.quantile(0.90))
+                else:
+                    _fallback_global = float(_y_global.sort_values(ascending=False).head(min(int(_n_top_promedio), len(_y_global))).mean())
+
+                _mask_fallback = _mask_pred & _estimado.isna()
+                _estimado.loc[_mask_fallback] = _fallback_global
+                _estimado_ok.loc[_mask_fallback] = 1.0
+                _n_ref_usados.loc[_mask_fallback] = float(len(_y_global))
+                _conf.loc[_mask_fallback] = 25.0
+                _detalle_modelo.loc[_mask_fallback] = "Fallback global: faltan comparables/variables"
+
+            _filas_diag.append({
+                "Variable": "Base histórica total",
+                "Detalle": "Puntos válidos después de filtros",
+                "Valor": _n_ref_total,
+            })
+            for _f, _lbl, _w in _features_def:
+                if _f in _features:
+                    _filas_diag.append({
+                        "Variable": _lbl,
+                        "Detalle": "Incluida en distancia comparable",
+                        "Valor": _w,
+                    })
+                else:
+                    _filas_diag.append({
+                        "Variable": _lbl,
+                        "Detalle": "No encontrada en Excel/app",
+                        "Valor": np.nan,
+                    })
+    else:
+        # Fallback de emergencia si faltan demasiadas variables. No usa Producto.
+        _y = _rendimiento.dropna()
+        _y = _y[(_y > 5.0) & (_y < 40.0)]
+        if len(_y) > 0:
+            _fallback = float(_y.quantile(0.90))
+            _desde_dt_modelo = pd.Timestamp(desde)
+            _hasta_dt_modelo = pd.Timestamp(hasta) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            _mask_pred = (_fecha >= _desde_dt_modelo) & (_fecha <= _hasta_dt_modelo) & _fecha.notna()
+            _estimado.loc[_mask_pred] = _fallback
+            _estimado_ok.loc[_mask_pred] = 1.0
+            _conf.loc[_mask_pred] = 10.0
+            _n_ref_usados.loc[_mask_pred] = float(len(_y))
+            _detalle_modelo.loc[_mask_pred] = "Fallback por falta de variables críticas"
 
     df_agrup["Productividad_estimada"] = _estimado
     df_agrup["Rendimiento_esperado_producto"] = _estimado
-    df_agrup["Maximo_historico_validado_producto"] = _estimado
-    df_agrup["Estimado_disponible_referencia"] = _ideal_disponible
+    df_agrup["Target_operativo_producto"] = _estimado
+    df_agrup["Maximo_historico_validado_producto"] = np.nan
+    df_agrup["Estimado_disponible_referencia"] = _estimado_ok
     df_agrup["Detalle_estimado_referencia"] = _detalle_modelo
     df_agrup["Confiabilidad_benchmark_productividad"] = _conf
     df_agrup["N_vecinos_benchmark_productividad"] = _n_ref_usados
-    df_agrup["Indicador_target_optimo_productividad"] = _ideal_disponible
+    df_agrup["Distancia_benchmark_productividad"] = _dist_media
+    df_agrup["Indicador_target_optimo_productividad"] = _estimado_ok
     df_agrup["Percentil_rendimiento_base"] = np.nan
-    df_agrup["Target_operativo_producto"] = _estimado
 
     df_agrup["Desvio_vs_productividad_estimada"] = (
         pd.to_numeric(df_agrup["Rendimiento"], errors="coerce")
@@ -2165,7 +2187,7 @@ if unidad.startswith("Polimer") and all(
     df_agrup.loc[_desvio_tmp.isna(), "Alerta_baja_actividad"] = np.nan
 
     df_agrup["Gap_vs_target_operativo"] = _desvio_tmp
-    df_agrup["Gap_vs_maximo_historico"] = _desvio_tmp
+    df_agrup["Gap_vs_maximo_historico"] = np.nan
 
     if "Presion_R2301" in df_agrup.columns:
         _presion_final = pd.to_numeric(df_agrup["Presion_R2301"], errors="coerce")
@@ -2174,24 +2196,28 @@ if unidad.startswith("Polimer") and all(
     else:
         df_agrup["Presion_operacion_OK"] = np.nan
 
-    df_agrup["Periodo_base_productividad_2024"] = _ideal_disponible
+    df_agrup["Periodo_base_productividad_2024"] = _estimado_ok
 
     with sidebar_modelo:
-        with st.expander("Resumen rendimiento ideal", expanded=False):
+        with st.expander("Diagnóstico rendimiento estimado", expanded=False):
             st.caption(
-                "Esta tabla muestra los máximos históricos validados que se usan como ideal. "
-                "No hay grados sin estimación: si falta referencia por grado, se usa fallback."
+                "Estimación por antecedentes comparables usando solo variables de polvo/reactor. "
+                "No usa Producto/Grado pellet."
             )
-
-            _total = len(df_agrup)
-            _ok = int(_ideal_disponible.sum())
-            st.metric("Puntos con ideal", f"{_ok:,} / {_total:,}")
-
-            if len(_filas_stats) > 0:
-                _stats_df = pd.DataFrame(_filas_stats).sort_values(["Nivel", "Grupo"])
-                st.dataframe(_stats_df.round(3), width="stretch", hide_index=True)
-            else:
-                st.warning("No quedaron puntos de referencia con los filtros actuales. Se usará fallback simple.")
+            _total_visible = int(((_fecha >= pd.Timestamp(desde)) & (_fecha <= pd.Timestamp(hasta) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))).sum())
+            _ok_visible = int((_estimado_ok == 1.0).sum())
+            st.metric("Puntos visibles con estimado", f"{_ok_visible:,} / {_total_visible:,}")
+            st.metric("Variables críticas usadas", f"{_n_features} / 6")
+            if len(_features) > 0:
+                _features_txt = []
+                for _f, _lbl, _w in _features_def:
+                    if _f in _features:
+                        _features_txt.append(f"{_lbl}  | peso={_w}")
+                st.code("\n".join(_features_txt), language="text")
+            if len(_filas_diag) > 0:
+                st.dataframe(pd.DataFrame(_filas_diag), width="stretch", hide_index=True)
+            if _n_features < 4:
+                st.warning("Faltan variables críticas para una estimación confiable. Se usa fallback global.")
 
 # Mascara inicial: rango de fechas
 mask = (
