@@ -1187,7 +1187,7 @@ if unidad.startswith("Polimer") and all(
     # Las variables auxiliares del modelo de target se calculan internamente,
     # pero no se agregan al selector para evitar saturar la lista de variables.
     variables_productividad = {
-        "Productividad_estimada": "Rendimiento estimado [polvo/reactor]",
+        "Productividad_estimada": "Rendimiento estimado [promedio OK]",
         "Detalle_estimado_referencia": "Detalle rendimiento estimado",
         "Estimado_disponible_referencia": "Estimado disponible [0/1]",
         "Desvio_vs_productividad_estimada": "Desvío vs rendimiento estimado [Real - Estimado]",
@@ -1747,8 +1747,8 @@ df_agrup = aplicar_agrupacion(df, agrupacion)
 #     producción de PP, MFI del polvo y XS.
 # - El catalizador activo se calcula con la presión de descarga de las bombas:
 #     P-2209B = ZN-306; P-2209A = ZN-389.
-# - El estimado representa un rendimiento esperable/ideal comparable para esas
-#   condiciones de operación, calculado desde mejores antecedentes comparables.
+# - El estimado representa el rendimiento promedio esperable para esas condiciones
+#   de operación, usando como referencia solo períodos definidos como OK.
 # - El desvío Real - Estimado queda como señal de pérdida de actividad.
 
 if unidad.startswith("Polimer") and all(
@@ -1802,26 +1802,94 @@ if unidad.startswith("Polimer") and all(
     with sidebar_modelo:
         st.markdown("---")
         st.subheader("Modelo rendimiento estimado")
-        with st.expander("Estimación por polvo/reactor", expanded=False):
+        with st.expander("Estimación promedio por polvo/reactor", expanded=False):
             st.caption(
-                "No usa Producto/Grado pellet. Compara cada punto contra antecedentes "
-                "con condiciones similares de polvo y reactor."
+                "No usa Producto/Grado pellet. Para cada punto busca antecedentes con condiciones "
+                "similares de polvo/reactor dentro de períodos definidos como OK y calcula un promedio esperado."
             )
 
             _criterio_estimado = st.selectbox(
                 "Criterio de estimación",
                 options=[
-                    "Promedio top comparables",
-                    "Percentil 90 comparables",
-                    "Máximo comparable",
+                    "Promedio comparables OK",
+                    "Mediana comparables OK",
+                    "Percentil 75 comparables OK",
                 ],
                 index=0,
-                key="criterio_estimado_polvo_reactor",
+                key="criterio_estimado_promedio_ok_polvo_reactor",
                 help=(
-                    "Promedio top comparables es el recomendado: toma los mejores puntos históricos "
-                    "entre condiciones similares, pero evita que un único outlier defina el estimado."
+                    "Promedio comparables OK es el criterio recomendado: compara contra el promedio "
+                    "de operación en períodos que ustedes consideran correctos, con condiciones similares."
                 ),
             )
+
+            st.markdown("**Períodos OK usados como referencia**")
+            _usar_solo_periodos_ok = st.checkbox(
+                "Usar solo períodos OK como base",
+                value=True,
+                key="usar_solo_periodos_ok_polvo_reactor",
+                help=(
+                    "Activado: el estimado se calcula solo con los períodos que definís abajo como operación OK. "
+                    "Desactivado: usa todo el histórico válido filtrado."
+                ),
+            )
+
+            _usar_ok_1 = st.checkbox(
+                "Incluir abril 2025",
+                value=True,
+                key="usar_ok_abril2025_polvo_reactor",
+            )
+            c_ok1_1, c_ok1_2 = st.columns(2)
+            with c_ok1_1:
+                _ok1_desde = st.date_input(
+                    "Abril OK desde",
+                    value=pd.Timestamp("2025-04-01").date(),
+                    key="ok1_desde_polvo_reactor",
+                )
+            with c_ok1_2:
+                _ok1_hasta = st.date_input(
+                    "Abril OK hasta",
+                    value=pd.Timestamp("2025-04-30").date(),
+                    key="ok1_hasta_polvo_reactor",
+                )
+
+            _usar_ok_2 = st.checkbox(
+                "Incluir noviembre/diciembre 2025",
+                value=True,
+                key="usar_ok_novdic2025_polvo_reactor",
+            )
+            c_ok2_1, c_ok2_2 = st.columns(2)
+            with c_ok2_1:
+                _ok2_desde = st.date_input(
+                    "Nov/Dic OK desde",
+                    value=pd.Timestamp("2025-11-01").date(),
+                    key="ok2_desde_polvo_reactor",
+                )
+            with c_ok2_2:
+                _ok2_hasta = st.date_input(
+                    "Nov/Dic OK hasta",
+                    value=pd.Timestamp("2025-12-31").date(),
+                    key="ok2_hasta_polvo_reactor",
+                )
+
+            _usar_ok_3 = st.checkbox(
+                "Incluir período OK manual",
+                value=False,
+                key="usar_ok_manual_polvo_reactor",
+            )
+            c_ok3_1, c_ok3_2 = st.columns(2)
+            with c_ok3_1:
+                _ok3_desde = st.date_input(
+                    "Manual OK desde",
+                    value=pd.Timestamp("2026-01-01").date(),
+                    key="ok3_desde_polvo_reactor",
+                )
+            with c_ok3_2:
+                _ok3_hasta = st.date_input(
+                    "Manual OK hasta",
+                    value=pd.Timestamp("2026-02-28").date(),
+                    key="ok3_hasta_polvo_reactor",
+                )
 
             c_mod_1, c_mod_2 = st.columns(2)
             with c_mod_1:
@@ -1829,19 +1897,20 @@ if unidad.startswith("Polimer") and all(
                     "Mín. comparables",
                     min_value=5,
                     max_value=150,
-                    value=25,
+                    value=20,
                     step=5,
                     key="min_comparables_polvo_reactor",
+                    help="Mínimo de antecedentes similares necesarios para calcular el promedio estimado.",
                 )
             with c_mod_2:
                 _n_top_promedio = st.number_input(
-                    "Top para promedio",
-                    min_value=1,
-                    max_value=20,
-                    value=5,
-                    step=1,
-                    key="top_promedio_polvo_reactor",
-                    help="Cantidad de mejores puntos comparables usados para el promedio top.",
+                    "Máx. comparables",
+                    min_value=10,
+                    max_value=300,
+                    value=80,
+                    step=10,
+                    key="max_comparables_polvo_reactor",
+                    help="Cantidad máxima de antecedentes más cercanos usados para el promedio.",
                 )
 
             c_mod_3, c_mod_4 = st.columns(2)
@@ -1908,7 +1977,7 @@ if unidad.startswith("Polimer") and all(
 
             st.info(
                 "Variables usadas: propano, H2, caudal catalizador activo, producción PP, MFI polvo y XS. "
-                "Producto/Grado pellet no participa del cálculo."
+                "Producto/Grado pellet no participa del cálculo. El resultado es un rendimiento estimado promedio, no un máximo."
             )
 
     # ----------------------------------------------------------------------
@@ -1985,6 +2054,35 @@ if unidad.startswith("Polimer") and all(
             )
         )
         _base_mask = _base_mask & (~_evento_bajo_nivel)
+
+        # Base de referencia: períodos OK definidos por el usuario.
+        # Esto reemplaza el enfoque de máximo histórico. El estimado representa
+        # cómo deberíamos estar respecto al PROMEDIO de operación OK, para
+        # condiciones similares de polvo/reactor.
+        _periodos_ok_mask = pd.Series(False, index=df_agrup.index)
+        _periodos_ok_detalle = []
+
+        def _agregar_periodo_ok(_usar, _desde, _hasta, _nombre):
+            nonlocal_periodo = None
+            try:
+                if bool(_usar):
+                    _d = pd.Timestamp(_desde)
+                    _h = pd.Timestamp(_hasta) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                    if _d <= _h:
+                        _mask_ok = (_fecha >= _d) & (_fecha <= _h)
+                        _periodos_ok_detalle.append(f"{_nombre}: {_d.date()} a {_h.date()}")
+                        return _mask_ok
+            except Exception:
+                pass
+            return pd.Series(False, index=df_agrup.index)
+
+        _periodos_ok_mask = _periodos_ok_mask | _agregar_periodo_ok(_usar_ok_1, _ok1_desde, _ok1_hasta, "Abril 2025")
+        _periodos_ok_mask = _periodos_ok_mask | _agregar_periodo_ok(_usar_ok_2, _ok2_desde, _ok2_hasta, "Nov/Dic 2025")
+        _periodos_ok_mask = _periodos_ok_mask | _agregar_periodo_ok(_usar_ok_3, _ok3_desde, _ok3_hasta, "Manual")
+
+        _usa_periodos_ok = bool(_usar_solo_periodos_ok) and bool(_periodos_ok_mask.any())
+        if _usa_periodos_ok:
+            _base_mask = _base_mask & _periodos_ok_mask
 
         # Outliers severos de rendimiento.
         if bool(_usar_outliers) and int(_base_mask.sum()) >= 20:
@@ -2078,21 +2176,21 @@ if unidad.startswith("Polimer") and all(
                     if len(_candidatos) < int(_n_vecinos_min):
                         _candidatos = _dist_valid.sort_values().head(min(int(_n_vecinos_min), len(_dist_valid)))
                     else:
-                        # Limitar para que no se diluya con puntos demasiado lejanos.
-                        _candidatos = _candidatos.head(max(int(_n_vecinos_min), 80))
+                        # Limitar al conjunto de puntos más cercanos para no mezclar condiciones muy distintas.
+                        _max_comp = max(int(_n_vecinos_min), int(_n_top_promedio))
+                        _candidatos = _candidatos.head(min(_max_comp, len(_candidatos)))
 
                     _y_comp = _y_ref.loc[_candidatos.index].dropna()
                     if len(_y_comp) == 0:
                         _detalle_modelo.loc[_idx] = "Sin rendimiento comparable"
                         continue
 
-                    if _criterio_estimado.startswith("Máximo"):
-                        _est = float(_y_comp.max())
-                    elif _criterio_estimado.startswith("Percentil"):
-                        _est = float(_y_comp.quantile(0.90))
+                    if _criterio_estimado.startswith("Percentil"):
+                        _est = float(_y_comp.quantile(0.75))
+                    elif _criterio_estimado.startswith("Mediana"):
+                        _est = float(_y_comp.median())
                     else:
-                        _top = _y_comp.sort_values(ascending=False).head(min(int(_n_top_promedio), len(_y_comp)))
-                        _est = float(_top.mean())
+                        _est = float(_y_comp.mean())
 
                     if np.isfinite(_est):
                         _estimado.loc[_idx] = _est
@@ -2111,27 +2209,34 @@ if unidad.startswith("Polimer") and all(
                     _detalle_modelo.loc[_idx] = f"Error estimación: {_exc_est}"
 
             # Fallback global para evitar cortes cuando falte alguna variable crítica.
+            # Usa el promedio/mediana/percentil de la base OK filtrada, nunca un máximo.
             _y_global = _y_ref_total.dropna()
             if len(_y_global) > 0:
-                if _criterio_estimado.startswith("Máximo"):
-                    _fallback_global = float(_y_global.max())
-                elif _criterio_estimado.startswith("Percentil"):
-                    _fallback_global = float(_y_global.quantile(0.90))
+                if _criterio_estimado.startswith("Percentil"):
+                    _fallback_global = float(_y_global.quantile(0.75))
+                elif _criterio_estimado.startswith("Mediana"):
+                    _fallback_global = float(_y_global.median())
                 else:
-                    _fallback_global = float(_y_global.sort_values(ascending=False).head(min(int(_n_top_promedio), len(_y_global))).mean())
+                    _fallback_global = float(_y_global.mean())
 
                 _mask_fallback = _mask_pred & _estimado.isna()
                 _estimado.loc[_mask_fallback] = _fallback_global
                 _estimado_ok.loc[_mask_fallback] = 1.0
                 _n_ref_usados.loc[_mask_fallback] = float(len(_y_global))
                 _conf.loc[_mask_fallback] = 25.0
-                _detalle_modelo.loc[_mask_fallback] = "Fallback global: faltan comparables/variables"
+                _detalle_modelo.loc[_mask_fallback] = "Fallback promedio OK global: faltan comparables/variables"
 
             _filas_diag.append({
-                "Variable": "Base histórica total",
-                "Detalle": "Puntos válidos después de filtros",
+                "Variable": "Base referencia OK",
+                "Detalle": "Puntos válidos después de filtros y períodos OK" if _usa_periodos_ok else "Puntos válidos después de filtros; períodos OK desactivados",
                 "Valor": _n_ref_total,
             })
+            if _periodos_ok_detalle:
+                _filas_diag.append({
+                    "Variable": "Períodos OK",
+                    "Detalle": " | ".join(_periodos_ok_detalle),
+                    "Valor": np.nan,
+                })
             for _f, _lbl, _w in _features_def:
                 if _f in _features:
                     _filas_diag.append({
@@ -2150,7 +2255,7 @@ if unidad.startswith("Polimer") and all(
         _y = _rendimiento.dropna()
         _y = _y[(_y > 5.0) & (_y < 40.0)]
         if len(_y) > 0:
-            _fallback = float(_y.quantile(0.90))
+            _fallback = float(_y.mean())
             _desde_dt_modelo = pd.Timestamp(desde)
             _hasta_dt_modelo = pd.Timestamp(hasta) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
             _mask_pred = (_fecha >= _desde_dt_modelo) & (_fecha <= _hasta_dt_modelo) & _fecha.notna()
@@ -2158,7 +2263,7 @@ if unidad.startswith("Polimer") and all(
             _estimado_ok.loc[_mask_pred] = 1.0
             _conf.loc[_mask_pred] = 10.0
             _n_ref_usados.loc[_mask_pred] = float(len(_y))
-            _detalle_modelo.loc[_mask_pred] = "Fallback por falta de variables críticas"
+            _detalle_modelo.loc[_mask_pred] = "Fallback promedio histórico por falta de variables críticas"
 
     df_agrup["Productividad_estimada"] = _estimado
     df_agrup["Rendimiento_esperado_producto"] = _estimado
@@ -2201,8 +2306,8 @@ if unidad.startswith("Polimer") and all(
     with sidebar_modelo:
         with st.expander("Diagnóstico rendimiento estimado", expanded=False):
             st.caption(
-                "Estimación por antecedentes comparables usando solo variables de polvo/reactor. "
-                "No usa Producto/Grado pellet."
+                "Estimación promedio contra períodos OK usando solo variables de polvo/reactor. "
+                "No usa Producto/Grado pellet ni máximos históricos."
             )
             _total_visible = int(((_fecha >= pd.Timestamp(desde)) & (_fecha <= pd.Timestamp(hasta) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))).sum())
             _ok_visible = int((_estimado_ok == 1.0).sum())
@@ -2509,7 +2614,7 @@ with tab1:
         st.info("Selecciona al menos una variable en el panel lateral.")
     else:
         if grafico_rendimiento_target:
-            st.caption("Vista rapida: Rendimiento real vs rendimiento estimado por producto. Esta opcion no cambia la seleccion general de variables.")
+            st.caption("Vista rápida: Rendimiento real vs rendimiento estimado promedio OK. Esta opción no cambia la selección general de variables.")
 
         if modo_grafico_efectivo == "Combinados":
             variables_y2 = [v for v in variables_y2_sidebar if v in variables_grafico]

@@ -1,12 +1,12 @@
 # Streamlit - Tendencias Destilación / Polimerización
 
-Versión corregida del rendimiento estimado para Polimerización.
+Versión con **rendimiento estimado promedio OK por polvo/reactor**.
 
-## Criterio
+## Criterio del modelo
 
-El rendimiento estimado ya no usa Producto / Grado pellet.
+El producto/grado pellet no participa de la estimación.
 
-Se calcula exclusivamente con variables críticas de polvo y reactor:
+El estimado se calcula comparando cada punto contra antecedentes de períodos definidos como operación OK, usando únicamente:
 
 ```text
 Concentración de propano
@@ -17,33 +17,32 @@ MFI del polvo
 XS
 ```
 
-El caudal de catalizador activo se calcula con la lógica operativa:
+## Interpretación
 
 ```text
-P-2209B = ZN-306 activo cuando presión descarga P-2209B >= 30
-P-2209A = ZN-389 activo cuando presión descarga P-2209A >= 30
-Caudal catalizador activo = caudal ZN-306 activo + caudal ZN-389 activo
+Desvío = Rendimiento real - Rendimiento estimado promedio OK
 ```
 
-## Estimación
+- Desvío cercano a cero: rendimiento acorde al promedio esperado para esas condiciones.
+- Desvío negativo sostenido: posible pérdida de actividad / contaminante / revisar lechos.
+- Desvío positivo: rendimiento por encima del promedio OK comparable.
 
-Para cada punto visible, la app busca antecedentes históricos comparables por distancia normalizada en esas variables críticas. Luego calcula el rendimiento esperable/ideal con alguno de estos criterios:
+## Períodos OK configurables
+
+Por defecto quedan cargados:
 
 ```text
-Promedio top comparables  [recomendado]
-Percentil 90 comparables
-Máximo comparable
+Abril 2025: 2025/04/01 a 2025/04/30
+Noviembre-Diciembre 2025: 2025/11/01 a 2025/12/31
+Período manual opcional: desactivado por defecto
 ```
 
-El resultado se guarda como:
+Estos períodos se editan desde:
 
 ```text
-Productividad_estimada = Rendimiento estimado [polvo/reactor]
-Desvio_vs_productividad_estimada = Rendimiento real - Rendimiento estimado
+Modelo rendimiento estimado → Estimación promedio por polvo/reactor
 ```
 
-## Importante
+## Cambio respecto a la versión anterior
 
-La fecha de cambio de lecho, el producto pellet y el grado no participan del cálculo del estimado.
-
-El producto se mantiene solo como filtro visual y para marcar campañas en los gráficos.
+Se eliminó el concepto de máximo/ideal histórico como curva principal. Ahora la curva representa el **promedio esperado en períodos OK** para condiciones similares de polvo/reactor.
