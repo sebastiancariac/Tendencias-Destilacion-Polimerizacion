@@ -1,12 +1,20 @@
 # Streamlit - Tendencias Destilación / Polimerización
 
-Versión con **rendimiento estimado promedio OK por polvo/reactor**.
+Versión con interfaz limpia para rendimiento estimado.
 
-## Criterio del modelo
+## Criterio visible
 
-El producto/grado pellet no participa de la estimación.
+Se deja una sola variable visible para el usuario:
 
-El estimado se calcula comparando cada punto contra antecedentes de períodos definidos como operación OK, usando únicamente:
+```text
+Rendimiento estimado
+```
+
+Las columnas auxiliares del modelo quedan internas y no aparecen en el selector de variables.
+
+## Estimación
+
+El rendimiento estimado se calcula como promedio de antecedentes comparables en períodos OK usando solo variables de polvo/reactor:
 
 ```text
 Concentración de propano
@@ -17,32 +25,16 @@ MFI del polvo
 XS
 ```
 
-## Interpretación
+No se usa producto/grado pellet. No se usa máximo histórico.
+
+## Diagnóstico interno
+
+La app conserva un diagnóstico en el panel del modelo para revisar:
 
 ```text
-Desvío = Rendimiento real - Rendimiento estimado promedio OK
+Puntos visibles con estimado
+Variables críticas usadas
+Promedio estimado
+Rango estimado
+Desvío promedio visible
 ```
-
-- Desvío cercano a cero: rendimiento acorde al promedio esperado para esas condiciones.
-- Desvío negativo sostenido: posible pérdida de actividad / contaminante / revisar lechos.
-- Desvío positivo: rendimiento por encima del promedio OK comparable.
-
-## Períodos OK configurables
-
-Por defecto quedan cargados:
-
-```text
-Abril 2025: 2025/04/01 a 2025/04/30
-Noviembre-Diciembre 2025: 2025/11/01 a 2025/12/31
-Período manual opcional: desactivado por defecto
-```
-
-Estos períodos se editan desde:
-
-```text
-Modelo rendimiento estimado → Estimación promedio por polvo/reactor
-```
-
-## Cambio respecto a la versión anterior
-
-Se eliminó el concepto de máximo/ideal histórico como curva principal. Ahora la curva representa el **promedio esperado en períodos OK** para condiciones similares de polvo/reactor.
