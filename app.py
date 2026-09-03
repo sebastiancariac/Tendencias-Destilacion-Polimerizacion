@@ -1518,14 +1518,47 @@ with sidebar_principal:
     if modo_grafico == "Combinados" and len(variables_para_ejes) >= 2:
         st.markdown("---")
         st.subheader("Eje Y secundario")
+
+        # Variables que tienen la misma unidad que el rendimiento real.
+        # Si se comparan entre sí, NO deben ir en ejes Y distintos porque la lectura visual queda engañosa.
+        vars_rendimiento_misma_unidad = {
+            "Rendimiento",
+            "Productividad_estimada",
+            "Rendimiento_esperado_producto",
+            "Maximo_historico_validado_producto",
+            "Target_operativo_producto",
+        }
+
+        default_y2 = [
+            v for v in variables_para_ejes[1:]
+            if not (
+                "Rendimiento" in variables_para_ejes
+                and v in vars_rendimiento_misma_unidad
+            )
+        ]
+
         variables_y2_sidebar = st.multiselect(
             "Variables en eje derecho:",
             options=variables_para_ejes,
-            default=variables_para_ejes[1:],
+            default=default_y2,
             format_func=lambda x: nombres_legibles[x],
             key=f"variables_y2_sidebar_{unidad}",
-            help="Las variables no seleccionadas quedan en el eje izquierdo.",
+            help=(
+                "Las variables no seleccionadas quedan en el eje izquierdo. "
+                "Rendimiento real e ideal/estimado se mantienen siempre en el mismo eje."
+            ),
         )
+
+        if "Rendimiento" in variables_para_ejes:
+            _y2_original = list(variables_y2_sidebar)
+            variables_y2_sidebar = [
+                v for v in variables_y2_sidebar
+                if v not in vars_rendimiento_misma_unidad
+            ]
+            if len(_y2_original) != len(variables_y2_sidebar):
+                st.caption(
+                    "Rendimiento real e ideal/estimado se fuerzan al mismo eje Y para que la comparación sea válida."
+                )
 
         # Evitar que todas las variables queden en el eje derecho.
         if len(variables_y2_sidebar) == len(variables_para_ejes):
@@ -1806,7 +1839,7 @@ if unidad.startswith("Polimer") and all(
                 )
 
             st.info(
-                "Interpretación: Real - Ideal negativo y sostenido = pérdida frente al máximo histórico validado. "
+                "Interpretación: Real - Ideal negativo y sostenido = pérdida frente al máximo histórico del grado. "
                 "Esto puede orientar revisión de contaminantes, actividad catalítica o cambio de lechos."
             )
 
@@ -1995,6 +2028,41 @@ if unidad.startswith("Polimer") and all(
         bool(_usar_filtro_iqr_ideal),
     )
 
+    # Piso de consistencia: si lo llamamos "máximo histórico", no puede quedar por debajo
+    # de un rendimiento real observado para el mismo grado dentro del dataset disponible.
+    # Este piso usa solo limpieza mínima física, no IQR ni filtros de operación normal,
+    # porque esos filtros podían dejar afuera el propio valor máximo y generar una curva
+    # de "máximo" menor que el real.
+    _mask_obs_max = (
+        _rendimiento.notna()
+        & _producto_norm.notna()
+        & (_rendimiento > 0.0)
+        & (_rendimiento < 40.0)
+    )
+
+    _max_observado_producto = {}
+    _n_observado_producto = {}
+    _max_observado_familia = {}
+    _n_observado_familia = {}
+
+    try:
+        _obs_df = pd.DataFrame(
+            {
+                "Producto": _producto_norm,
+                "Familia": _familia_fallback,
+                "Rendimiento": _rendimiento,
+            },
+            index=df_agrup.index,
+        ).loc[_mask_obs_max].copy()
+
+        if len(_obs_df) > 0:
+            _max_observado_producto = _obs_df.groupby("Producto")["Rendimiento"].max().astype(float).to_dict()
+            _n_observado_producto = _obs_df.groupby("Producto")["Rendimiento"].count().astype(int).to_dict()
+            _max_observado_familia = _obs_df.groupby("Familia")["Rendimiento"].max().astype(float).to_dict()
+            _n_observado_familia = _obs_df.groupby("Familia")["Rendimiento"].count().astype(int).to_dict()
+    except Exception:
+        pass
+
     _estimado = pd.Series(np.nan, index=df_agrup.index, dtype=float)
     _ideal_disponible = pd.Series(0.0, index=df_agrup.index, dtype=float)
     _detalle_modelo = pd.Series("Sin producto", index=df_agrup.index, dtype="string")
@@ -2031,6 +2099,24 @@ if unidad.startswith("Polimer") and all(
             _nivel_ref = "global"
 
         if np.isfinite(_ideal):
+            _ideal_original = float(_ideal)
+
+            # Garantía de consistencia para el máximo histórico:
+            # por grado primero; si no hay, por familia; si no hay, queda el ideal calculado.
+            _piso_obs = np.nan
+            _n_obs = 0
+            if not pd.isna(_prod) and str(_prod) in _max_observado_producto:
+                _piso_obs = float(_max_observado_producto[str(_prod)])
+                _n_obs = int(_n_observado_producto.get(str(_prod), 0))
+            elif not pd.isna(_fam) and str(_fam) in _max_observado_familia:
+                _piso_obs = float(_max_observado_familia[str(_fam)])
+                _n_obs = int(_n_observado_familia.get(str(_fam), 0))
+
+            if np.isfinite(_piso_obs) and _piso_obs > _ideal:
+                _ideal = _piso_obs
+                _detalle = _detalle + " + piso máximo observado"
+                _n_usado = max(int(_n_usado), int(_n_obs))
+
             _estimado.loc[_idx] = float(_ideal)
             _ideal_disponible.loc[_idx] = 1.0
             _n_ref_usados.loc[_idx] = float(_n_usado)
@@ -2400,14 +2486,31 @@ with tab1:
             st.caption("Vista rapida: Rendimiento real vs rendimiento estimado por producto. Esta opcion no cambia la seleccion general de variables.")
 
         if modo_grafico_efectivo == "Combinados":
-            usar_y2_efectivo = len(variables_grafico) >= 2
-            variables_y2 = [v for v in variables_y2_sidebar if v in variables_grafico] if usar_y2_efectivo else []
-            variables_y1 = [v for v in variables_grafico if v not in variables_y2] if usar_y2_efectivo else list(variables_grafico)
+            variables_y2 = [v for v in variables_y2_sidebar if v in variables_grafico]
+
+            vars_rendimiento_misma_unidad_plot = {
+                "Rendimiento",
+                "Productividad_estimada",
+                "Rendimiento_esperado_producto",
+                "Maximo_historico_validado_producto",
+                "Target_operativo_producto",
+            }
+
+            if "Rendimiento" in variables_grafico:
+                variables_y2 = [
+                    v for v in variables_y2
+                    if v not in vars_rendimiento_misma_unidad_plot
+                ]
+
+            # Solo se crea eje derecho si realmente quedó alguna variable asignada al eje derecho.
+            usar_y2_efectivo = len(variables_y2) > 0
+            variables_y1 = [v for v in variables_grafico if v not in variables_y2]
 
             # Si por algún motivo el eje izquierdo queda vacío, forzar la primera variable allí.
             if usar_y2_efectivo and not variables_y1 and variables_grafico:
                 variables_y1 = [variables_grafico[0]]
                 variables_y2 = [v for v in variables_y2 if v != variables_grafico[0]]
+                usar_y2_efectivo = len(variables_y2) > 0
 
             def _rango_ampliado(series, factor=2.0):
                 datos = pd.to_numeric(series, errors="coerce").dropna()

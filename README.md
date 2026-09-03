@@ -44,3 +44,15 @@ Modelo rendimiento ideal → Rendimiento ideal histórico
 - Usar filtros de operación normal
 - Excluir evento bajo nivel reactor
 ```
+
+
+## Fix de comparación real vs ideal
+
+Correcciones aplicadas:
+
+```text
+1. Rendimiento real e ideal/estimado se fuerzan al mismo eje Y.
+2. El eje secundario ya no se usa para comparar variables con la misma unidad de rendimiento.
+3. El rendimiento ideal tiene un piso de consistencia: no puede ser menor que el máximo real observado del mismo grado dentro del dataset disponible.
+4. Se mantiene la limpieza de outliers para la tabla de referencia, pero el valor llamado máximo histórico no queda por debajo de un real observado.
+```
