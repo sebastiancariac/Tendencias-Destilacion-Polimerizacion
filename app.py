@@ -807,6 +807,62 @@ def convertir_fechas_ip21(columna, formato_texto="Automático"):
     return resultado, resumen
 
 
+
+def convertir_numeros_ip21(columna):
+    """Convierte valores numéricos de IP21 sin descartar decimales con coma.
+
+    Tolera celdas numéricas, texto con coma decimal, separadores de millares,
+    espacios, signos y notación científica. Los errores/ausencias devuelven NaN:
+    nunca se inventa ni rellena una medición faltante.
+    """
+    valores = pd.Series(columna).copy()
+    num = pd.to_numeric(valores, errors="coerce")
+    pendientes = num.isna() & valores.notna()
+    if not pendientes.any():
+        return num
+
+    s = valores.loc[pendientes].astype("string").str.strip()
+    s = s.str.replace(r"[\s\u00a0\u202f]", "", regex=True)
+    s = s.str.replace("−", "-", regex=False)
+    # No leer estados IP21 (Bad, No Data, Error) como datos.
+    # Ambos separadores: el último es decimal, los anteriores son miles.
+    tiene_coma = s.str.contains(",", regex=False, na=False)
+    tiene_punto = s.str.contains(".", regex=False, na=False)
+    ambos = tiene_coma & tiene_punto
+    coma_decimal = ambos & (s.str.rfind(",") > s.str.rfind("."))
+    punto_decimal = ambos & (~coma_decimal)
+    s.loc[coma_decimal] = (s.loc[coma_decimal]
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False))
+    s.loc[punto_decimal] = s.loc[punto_decimal].str.replace(",", "", regex=False)
+    solo_coma = tiene_coma & ~tiene_punto
+    s.loc[solo_coma] = s.loc[solo_coma].str.replace(",", ".", regex=False)
+    convertidos = pd.to_numeric(s, errors="coerce")
+    num = num.astype("float64")
+    num.loc[pendientes] = convertidos.to_numpy(dtype=float, na_value=np.nan)
+    return num
+
+
+def resumir_importacion_variable(columna_cruda, columna_numerica, fechas):
+    """Auditoría por TAG: separa valores existentes de valores interpretados."""
+    crudo = pd.Series(columna_cruda).reset_index(drop=True)
+    numero = pd.Series(columna_numerica).reset_index(drop=True)
+    fecha = pd.to_datetime(pd.Series(fechas).reset_index(drop=True), errors="coerce")
+    no_vacio = crudo.notna() & crudo.astype("string").str.strip().ne("")
+    ultimo_crudo = fecha.loc[no_vacio].max()
+    ultimo_numerico = fecha.loc[numero.notna()].max()
+    sin_convertir = no_vacio & numero.isna() & fecha.notna()
+    # Para identificar datos que sí están en el Excel pero fallan al convertirse.
+    ejemplos = crudo.loc[sin_convertir].astype(str).tail(3).tolist()
+    return {
+        "Celdas con valor": int(no_vacio.sum()),
+        "Valores numéricos": int(numero.notna().sum()),
+        "Último registro con valor": ultimo_crudo,
+        "Último registro numérico": ultimo_numerico,
+        "Ejemplos no numéricos": ", ".join(ejemplos) if ejemplos else "",
+    }
+
+
 def obtener_mtime_archivo() -> float | None:
     """
     Devuelve la fecha de modificacion del Excel local.
@@ -906,7 +962,14 @@ def cargar_datos(
             })
             continue
 
-        df_out[var] = pd.to_numeric(df_datos.iloc[:, col_excel], errors="coerce")
+        # IMPORTANTE: si IP21 pasa a exportar decimales con coma, no perder
+        # silenciosamente todos los valores posteriores a una fecha.
+        col_cruda = df_datos.iloc[:, col_excel]
+        col_numerica = convertir_numeros_ip21(col_cruda)
+        df_out[var] = col_numerica
+        diag_columna = resumir_importacion_variable(
+            col_cruda, col_numerica, fechas_leidas
+        )
         filas_mapeo.append({
             "Variable app": var,
             "Nombre": label,
@@ -915,6 +978,7 @@ def cargar_datos(
             "TAG Excel": tags_excel[col_excel],
             "Descripcion Excel": descripciones_excel[col_excel],
             "Estado": "OK",
+            **diag_columna,
         })
 
     # Columna opcional de producto/campaña.
@@ -1092,16 +1156,45 @@ with sidebar_datos:
             if nombre_variable not in df.columns:
                 continue
             ultimo = df.loc[df[nombre_variable].notna(), "Fecha_y_hora"].max()
+            f_mapeo = mapeo_columnas.loc[
+                mapeo_columnas["Variable app"] == nombre_variable
+            ]
+            fila_mapeo = f_mapeo.iloc[0] if len(f_mapeo) else {}
+            ultimo_crudo = fila_mapeo.get("Último registro con valor", pd.NaT)
             ultimos_por_variable.append({
                 "Variable": nombres_legibles.get(nombre_variable, nombre_variable),
-                "Último dato válido": ultimo.strftime("%d/%m/%Y %H:%M") if pd.notna(ultimo) else "Sin datos",
+                "Último valor en Excel": ultimo_crudo.strftime("%d/%m/%Y %H:%M") if pd.notna(ultimo_crudo) else "Sin valores",
+                "Último valor numérico": ultimo.strftime("%d/%m/%Y %H:%M") if pd.notna(ultimo) else "Sin datos",
+                "No numéricos (muestras)": fila_mapeo.get("Ejemplos no numéricos", ""),
             })
         st.dataframe(pd.DataFrame(ultimos_por_variable), hide_index=True, width="stretch")
         st.caption(
-            "Si el archivo termina el 06/09/2026, tenés que cargar el Excel actualizado. "
-            "Si el archivo llega más lejos pero una variable se corta, el problema "
-            "está en esa columna o TAG, no en el selector de fechas."
+            "Si el último valor en Excel es posterior al último valor numérico, "
+            "hay valores no convertidos por formato o estados IP21. "
+            "Si ambos terminan juntos, ese TAG no trae datos posteriores en el Excel cargado."
         )
+
+    # Aviso explícito cuando el Excel tiene fechas recientes pero las variables
+    # principales no tienen valores recientes (caso Destilación, sep-2026).
+    if unidad == "Destilación":
+        fin_excel = df["Fecha_y_hora"].max()
+        atrasadas = []
+        for clave in config["default_vars"]:
+            fin_var = df.loc[df[clave].notna(), "Fecha_y_hora"].max()
+            if pd.isna(fin_var) or (fin_excel - fin_var).days >= 7:
+                atrasadas.append((nombres_legibles.get(clave, clave), fin_var))
+        if atrasadas:
+            detalle = "; ".join(
+                f"{nombre}: {fecha:%d/%m/%Y}" if pd.notna(fecha)
+                else f"{nombre}: sin valores"
+                for nombre, fecha in atrasadas
+            )
+            st.warning(
+                f"El archivo contiene fechas hasta {fin_excel:%d/%m/%Y}, pero "
+                f"algunas variables no tienen datos hasta esa fecha. {detalle}. "
+                "Revisá 'Verificación de fechas y datos importados' para "
+                "distinguir entre celdas vacías y valores no numéricos."
+            )
 
     if not mapeo_columnas.empty:
         errores_mapeo = mapeo_columnas[mapeo_columnas["Estado"] != "OK"]
