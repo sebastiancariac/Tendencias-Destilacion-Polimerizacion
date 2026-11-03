@@ -726,6 +726,87 @@ def buscar_columna_por_descripcion(descripciones_excel, descripcion_buscada):
 
     return None
 
+def convertir_fechas_ip21(columna, formato_texto="Automático"):
+    """Lee fechas Excel reales, seriales Excel y texto con formatos mixtos.
+
+    Evita el problema de pd.to_datetime aplicado a una columna heterogénea:
+    pandas puede inferir el formato de los primeros registros y perder todos
+    los posteriores cuando cambia el formato de escritura.
+
+    Retorna (fechas, resumen). Conserva la posición original de cada fila.
+    """
+    valores = pd.Series(columna).reset_index(drop=True)
+    fechas = pd.Series(pd.NaT, index=valores.index, dtype="datetime64[ns]")
+    # Fechas nativas de Excel (datetime/Timestamp, incluidas celdas vacías).
+    es_numero = valores.map(
+        lambda x: isinstance(x, (int, float, np.integer, np.floating))
+        and not isinstance(x, (bool, np.bool_))
+    )
+    es_texto = valores.map(lambda x: isinstance(x, str))
+
+    if (~es_numero & ~es_texto).any():
+        pos = (~es_numero & ~es_texto)
+        fechas.loc[pos] = pd.to_datetime(valores.loc[pos], errors="coerce").to_numpy()
+
+    # Excel guarda algunas fechas numéricas como seriales (ej.: 46300).
+    if es_numero.any():
+        nums = pd.to_numeric(valores.loc[es_numero], errors="coerce")
+        seriales = nums.between(20000, 100000)
+        if seriales.any():
+            fechas.loc[nums.index[seriales]] = pd.to_datetime(
+                nums.loc[seriales], origin="1899-12-30", unit="D", errors="coerce"
+            ).to_numpy()
+        # En raros casos, un timestamp Unix expresado en segundos.
+        unix = nums.between(1000000000, 5000000000)
+        if unix.any():
+            fechas.loc[nums.index[unix]] = pd.to_datetime(
+                nums.loc[unix], unit="s", errors="coerce"
+            ).to_numpy()
+
+    if es_texto.any():
+        txt = valores.loc[es_texto].astype("string").str.strip()
+        txt = txt.replace({"": pd.NA, "nan": pd.NA, "NaT": pd.NA, "None": pd.NA})
+        # Con pistas inequívocas como 13/09/2026 o 09/13/2026,
+        # se distingue el orden de día/mes para toda la columna.
+        componentes = txt.str.extract(r"^(\d{1,2})[/-](\d{1,2})[/-]\d{4}(?:\D|$)")
+        a = pd.to_numeric(componentes[0], errors="coerce")
+        b = pd.to_numeric(componentes[1], errors="coerce")
+        evid_dm = int(((a > 12) & (b <= 12)).sum())
+        evid_md = int(((b > 12) & (a <= 12)).sum())
+        if formato_texto == "Día/Mes/Año":
+            dayfirst = True
+        elif formato_texto == "Mes/Día/Año":
+            dayfirst = False
+        else:
+            dayfirst = evid_dm >= evid_md
+        # format='mixed' permite dd/mm, yyyy-mm-dd, yyyy/mm/dd y hora opcional
+        # en una misma columna. No fuerza un único patrón basado en la primera fila.
+        try:
+            parsed = pd.to_datetime(txt, format="mixed", dayfirst=dayfirst, errors="coerce")
+        except (TypeError, ValueError):
+            # Compatibilidad para entornos con pandas anterior a 2.0.
+            parsed = txt.map(lambda x: pd.to_datetime(x, dayfirst=dayfirst, errors="coerce"))
+        fechas.loc[txt.index] = parsed.to_numpy()
+    else:
+        dayfirst = True
+        evid_dm = evid_md = 0
+
+    invalida = valores.notna() & fechas.isna() & valores.astype('string').str.strip().ne('')
+    resultado = pd.Series(fechas.to_numpy(), index=pd.Series(columna).index)
+    resumen = {
+        "registros_crudos": int(len(valores)),
+        "fechas_validas": int(resultado.notna().sum()),
+        "fechas_no_interpretadas": int(invalida.sum()),
+        "ultimo_valor_crudo": str(valores.iloc[-1]) if len(valores) else "",
+        "ultima_fecha": resultado.max(),
+        "ejemplos_invalidos": valores.loc[invalida].astype(str).head(5).tolist(),
+        "orden_texto": "Día/Mes/Año" if dayfirst else "Mes/Día/Año",
+        "pistas_dia_mes": evid_dm,
+        "pistas_mes_dia": evid_md,
+    }
+    return resultado, resumen
+
+
 def obtener_mtime_archivo() -> float | None:
     """
     Devuelve la fecha de modificacion del Excel local.
@@ -743,7 +824,8 @@ def cargar_datos(
     nombres_legibles: dict,
     excel_mtime: float | None,
     excel_bytes: bytes | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    formato_fecha_excel: str = "Automático",
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     # excel_mtime no se usa directamente, pero fuerza a Streamlit a invalidar la cache
     # cuando cambia la fecha de modificacion de Tendencias.xlsx en modo local.
     _ = excel_mtime
@@ -795,7 +877,10 @@ def cargar_datos(
     df_datos = df_raw.iloc[5:, :].copy()
 
     df_out = pd.DataFrame()
-    df_out["Fecha_y_hora"] = pd.to_datetime(df_datos.iloc[:, col_fecha], errors="coerce")
+    fechas_leidas, resumen_fechas = convertir_fechas_ip21(
+        df_datos.iloc[:, col_fecha], formato_fecha_excel
+    )
+    df_out["Fecha_y_hora"] = fechas_leidas
 
     filas_mapeo = []
 
@@ -905,7 +990,7 @@ def cargar_datos(
 
     mapeo = pd.DataFrame(filas_mapeo)
 
-    return df_out, mapeo
+    return df_out, mapeo, resumen_fechas
 
 # ==============================================================================
 # SIDEBAR - SELECTORES
@@ -963,19 +1048,60 @@ with sidebar_datos:
         st.cache_data.clear()
         st.rerun()
 
-    df, mapeo_columnas = cargar_datos(
+    with st.expander("Formato de fechas del Excel", expanded=False):
+        formato_fecha_excel = st.selectbox(
+            "Interpretación de fechas escritas como texto",
+            ["Automático", "Día/Mes/Año", "Mes/Día/Año"],
+            index=0,
+            key=f"interpretacion_fechas_excel_{unidad}",
+            help="Dejá Automático salvo que el Excel exporte sus fechas de texto en formato estadounidense.",
+        )
+
+    df, mapeo_columnas, resumen_fechas = cargar_datos(
         config["hoja"],
         todas_variables,
         nombres_legibles,
         excel_mtime,
         excel_bytes,
+        formato_fecha_excel,
     )
 
     if df.empty:
         st.warning("La hoja seleccionada no tiene datos validos de fecha/hora.")
         st.stop()
 
-    st.caption(f"Hoja: {config['hoja']} | Registros crudos: {len(df):,}")
+    st.caption(
+        f"Hoja: {config['hoja']} | Registros con fecha: {len(df):,} | "
+        f"Última fecha detectada: {df['Fecha_y_hora'].max():%d/%m/%Y %H:%M}"
+    )
+    if resumen_fechas["fechas_no_interpretadas"] > 0:
+        st.warning(
+            f"Se encontraron {resumen_fechas['fechas_no_interpretadas']:,} filas "
+            "con fecha no reconocida. Revisá el formato en 'Formato de fechas del Excel'."
+        )
+    with st.expander("Verificación de fechas y datos importados", expanded=False):
+        st.write("**Origen:**", "Excel cargado" if excel_bytes is not None else ARCHIVO)
+        st.write("**Último valor de fecha crudo:**", resumen_fechas["ultimo_valor_crudo"])
+        st.write("**Fechas válidas:**", resumen_fechas["fechas_validas"])
+        st.write("**Fechas no reconocidas:**", resumen_fechas["fechas_no_interpretadas"])
+        st.write("**Orden interpretado (texto):**", resumen_fechas["orden_texto"])
+        if resumen_fechas["ejemplos_invalidos"]:
+            st.write("**Ejemplos sin interpretar:**", resumen_fechas["ejemplos_invalidos"])
+        ultimos_por_variable = []
+        for nombre_variable in config["variables"]:
+            if nombre_variable not in df.columns:
+                continue
+            ultimo = df.loc[df[nombre_variable].notna(), "Fecha_y_hora"].max()
+            ultimos_por_variable.append({
+                "Variable": nombres_legibles.get(nombre_variable, nombre_variable),
+                "Último dato válido": ultimo.strftime("%d/%m/%Y %H:%M") if pd.notna(ultimo) else "Sin datos",
+            })
+        st.dataframe(pd.DataFrame(ultimos_por_variable), hide_index=True, width="stretch")
+        st.caption(
+            "Si el archivo termina el 06/09/2026, tenés que cargar el Excel actualizado. "
+            "Si el archivo llega más lejos pero una variable se corta, el problema "
+            "está en esa columna o TAG, no en el selector de fechas."
+        )
 
     if not mapeo_columnas.empty:
         errores_mapeo = mapeo_columnas[mapeo_columnas["Estado"] != "OK"]
@@ -1306,151 +1432,93 @@ with sidebar_principal:
     fecha_min = df["Fecha_y_hora"].min().date()
     fecha_max = df["Fecha_y_hora"].max().date()
 
-    # Selector de fechas robusto.
-    # Se usan campos de texto para evitar problemas del calendario de Streamlit,
-    # y presets antes de crear los text_input para que los botones funcionen bien.
+    # Selección visible siempre en formato argentino DD/MM/AAAA.
+    # Los campos admiten fechas ISO antiguas de session_state sin perder el rango.
     st.caption(
-        f"Rango disponible en Excel: {fecha_min.strftime('%Y/%m/%d')} a {fecha_max.strftime('%Y/%m/%d')}"
+        f"Datos disponibles: {fecha_min:%d/%m/%Y} al {fecha_max:%d/%m/%Y}"
     )
-
     key_desde_text = f"fecha_desde_text_{unidad}"
     key_hasta_text = f"fecha_hasta_text_{unidad}"
 
-    if key_desde_text not in st.session_state:
-        st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
-
-    if key_hasta_text not in st.session_state:
-        st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
-
-    def _parse_fecha_sidebar(valor, fallback):
-        if valor is None or str(valor).strip() == "":
-            return fallback
-
-        texto = str(valor).strip()
-
-        for formato in ["%Y/%m/%d", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"]:
-            try:
-                return pd.to_datetime(texto, format=formato).date()
-            except Exception:
-                pass
-
-        fecha = pd.to_datetime(texto, errors="coerce", dayfirst=False)
-        if pd.isna(fecha):
-            fecha = pd.to_datetime(texto, errors="coerce", dayfirst=True)
-
-        if pd.isna(fecha):
+    def _interpretar_fecha_selector(valor):
+        if valor is None:
             return None
+        valor = str(valor).strip()
+        if not valor:
+            return None
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%Y-%m-%d"):
+            try:
+                return pd.to_datetime(valor, format=fmt, errors="raise").date()
+            except (ValueError, TypeError):
+                pass
+        return None
 
-        return fecha.date()
-
-    def _nombre_mes_es(fecha_ts):
-        meses = {
-            1: "Enero",
-            2: "Febrero",
-            3: "Marzo",
-            4: "Abril",
-            5: "Mayo",
-            6: "Junio",
-            7: "Julio",
-            8: "Agosto",
-            9: "Septiembre",
-            10: "Octubre",
-            11: "Noviembre",
-            12: "Diciembre",
-        }
-        return f"{meses[int(fecha_ts.month)]} {int(fecha_ts.year)}"
-
-    def _fin_de_mes(fecha_ts):
-        fecha_ts = pd.Timestamp(fecha_ts)
-        return (fecha_ts + pd.offsets.MonthEnd(0)).date()
-
-    # Presets de período. Importante: van ANTES de los text_input.
-    # Si se actualiza st.session_state después de crear el text_input,
-    # Streamlit puede no reflejar el cambio correctamente.
-    st.markdown("**Selección rápida de período**")
-
-    _meses_disponibles = (
-        pd.to_datetime(df["Fecha_y_hora"], errors="coerce")
-        .dropna()
-        .dt.to_period("M")
-        .drop_duplicates()
-        .sort_values()
-    )
-
-    if len(_meses_disponibles) > 0:
-        _meses_ts = [p.to_timestamp() for p in _meses_disponibles]
-        _labels_meses = [_nombre_mes_es(m) for m in _meses_ts]
-
-        # Seleccionar por defecto el mes del campo Hasta si existe; si no, el último mes disponible.
-        _hasta_actual = _parse_fecha_sidebar(st.session_state.get(key_hasta_text), fecha_max)
-        _periodo_hasta_actual = pd.Period(pd.Timestamp(_hasta_actual), freq="M") if _hasta_actual else pd.Period(pd.Timestamp(fecha_max), freq="M")
-        _periodos_lista = list(_meses_disponibles)
-
-        if _periodo_hasta_actual in _periodos_lista:
-            _idx_mes_default = _periodos_lista.index(_periodo_hasta_actual)
+    # Migrar fechas ISO de versiones anteriores SOLO si son válidas.
+    # No sobrescribir entradas parciales mientras el usuario edita un campo.
+    for clave, fecha_defecto in ((key_desde_text, fecha_min), (key_hasta_text, fecha_max)):
+        if clave not in st.session_state:
+            st.session_state[clave] = fecha_defecto.strftime("%d/%m/%Y")
         else:
-            _idx_mes_default = len(_meses_ts) - 1
+            valor_anterior = str(st.session_state[clave])
+            if re.fullmatch(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", valor_anterior):
+                fecha_anterior = _interpretar_fecha_selector(valor_anterior)
+                if fecha_anterior is not None:
+                    st.session_state[clave] = fecha_anterior.strftime("%d/%m/%Y")
 
-        _mes_seleccionado_label = st.selectbox(
-            "Mes para informe",
-            options=_labels_meses,
-            index=_idx_mes_default,
-            key=f"mes_informe_{unidad}",
-            help="Aplica el mes completo. Ejemplo: Julio 2026 = 2026/07/01 a 2026/07/31.",
-        )
+    # Si actualizaste el Excel y el "Hasta" anterior coincidía con la última
+    # fecha conocida, extenderlo automáticamente a la nueva fecha final.
+    clave_max_anterior = f"ultima_fecha_cargada_{unidad}"
+    max_anterior = _interpretar_fecha_selector(st.session_state.get(clave_max_anterior))
+    hasta_anterior = _interpretar_fecha_selector(st.session_state.get(key_hasta_text))
+    if max_anterior is not None and fecha_max > max_anterior and hasta_anterior == max_anterior:
+        st.session_state[key_hasta_text] = fecha_max.strftime("%d/%m/%Y")
+    st.session_state[clave_max_anterior] = fecha_max.strftime("%d/%m/%Y")
 
-        _idx_mes_sel = _labels_meses.index(_mes_seleccionado_label)
-        _mes_sel_ts = pd.Timestamp(_meses_ts[_idx_mes_sel])
-        _inicio_mes_sel = _mes_sel_ts.date()
-        _fin_mes_sel = _fin_de_mes(_mes_sel_ts)
-
-        c_preset_1, c_preset_2 = st.columns(2)
-        with c_preset_1:
-            if st.button("Aplicar mes", key=f"btn_aplicar_mes_{unidad}", width="stretch"):
-                st.session_state[key_desde_text] = _inicio_mes_sel.strftime("%Y/%m/%d")
-                st.session_state[key_hasta_text] = _fin_mes_sel.strftime("%Y/%m/%d")
-                st.rerun()
-
-        with c_preset_2:
-            if st.button("Usar todo", key=f"btn_fechas_todo_{unidad}", width="stretch"):
-                st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
-                st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
-                st.rerun()
-    else:
-        if st.button("Usar todo", key=f"btn_fechas_todo_{unidad}", width="stretch"):
-            st.session_state[key_desde_text] = fecha_min.strftime("%Y/%m/%d")
-            st.session_state[key_hasta_text] = fecha_max.strftime("%Y/%m/%d")
+    nombres_meses = (
+        "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+    )
+    periodos = (
+        df["Fecha_y_hora"].dropna().dt.to_period("M").drop_duplicates().sort_values().tolist()
+    )
+    st.markdown("**Selección rápida para informes mensuales**")
+    if periodos:
+        opciones_mes = [f"{nombres_meses[p.month - 1]} {p.year}" for p in periodos]
+        clave_mes = f"mes_informe_{unidad}"
+        if st.session_state.get(clave_mes) not in opciones_mes:
+            st.session_state[clave_mes] = opciones_mes[-1]
+        seleccion = st.selectbox("Mes", opciones_mes, key=clave_mes)
+        periodo_seleccionado = periodos[opciones_mes.index(seleccion)]
+        c_mes, c_todo = st.columns(2)
+        with c_mes:
+            mes_click = st.button("Aplicar mes completo", key=f"aplicar_mes_{unidad}", width="stretch")
+        with c_todo:
+            todo_click = st.button("Todo el período", key=f"todo_periodo_{unidad}", width="stretch")
+        if mes_click:
+            st.session_state[key_desde_text] = periodo_seleccionado.start_time.strftime("%d/%m/%Y")
+            st.session_state[key_hasta_text] = periodo_seleccionado.end_time.strftime("%d/%m/%Y")
+            st.rerun()
+        if todo_click:
+            st.session_state[key_desde_text] = fecha_min.strftime("%d/%m/%Y")
+            st.session_state[key_hasta_text] = fecha_max.strftime("%d/%m/%Y")
             st.rerun()
 
-    st.markdown("**Rango seleccionado**")
-
-    desde_txt = st.text_input(
-        "Desde",
-        key=key_desde_text,
-        help="Escribir como YYYY/MM/DD. Ejemplo: 2026/07/01",
-    )
-
-    hasta_txt = st.text_input(
-        "Hasta",
-        key=key_hasta_text,
-        help="Escribir como YYYY/MM/DD. Ejemplo: 2026/07/31",
-    )
-
-    desde = _parse_fecha_sidebar(desde_txt, fecha_min)
-    hasta = _parse_fecha_sidebar(hasta_txt, fecha_max)
+    st.markdown("**Rango personalizado (DD/MM/AAAA)**")
+    desde_txt = st.text_input("Desde", key=key_desde_text, help="Ejemplo: 07/09/2026")
+    hasta_txt = st.text_input("Hasta", key=key_hasta_text, help="Ejemplo: 30/09/2026")
+    desde = _interpretar_fecha_selector(desde_txt)
+    hasta = _interpretar_fecha_selector(hasta_txt)
 
     if desde is None or hasta is None:
-        st.error("Formato de fecha inválido. Usá YYYY/MM/DD, por ejemplo 2026/08/18.")
+        st.error("Usá fechas con formato DD/MM/AAAA (por ejemplo, 07/09/2026).")
         st.stop()
-
     if desde > hasta:
-        st.error("La fecha 'Desde' no puede ser posterior a 'Hasta'.")
+        st.error("La fecha 'Desde' no puede superar a 'Hasta'.")
         st.stop()
-
     if desde < fecha_min or hasta > fecha_max:
         st.warning(
-            "El rango seleccionado queda parcialmente fuera del Excel. "
-            "Se mostrarán solo los datos disponibles."
+            "El rango solicitado supera las fechas de los datos cargados. "
+            "Se visualizarán únicamente los registros disponibles."
         )
 
     st.markdown("---")
